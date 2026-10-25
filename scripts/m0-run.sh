@@ -51,7 +51,7 @@ if [ -z "$PASS" ]; then
 fi
 
 asg() {
-  sudo -u "$GISTBOT_USER" -H bash -lc "$1"
+  sudo -u "$GISTBOT_USER" -H bash -lc "cd '$GISTBOT_HOME' && $1" 
 }
 
 MODELS="$(asg "'$BIN' models" 2>&1)" || {
@@ -145,7 +145,7 @@ FREE_MSG="$(grep -E 'Free usage limit|Error:' "$M0/free.log" | tail -1 || true)"
 if [ -z "$FREE_MSG" ]; then FREE_MSG="$(tail -1 "$M0/free.log" || true)"; fi
 
 echo "CLI cancellation..."
-asg "setsid bash -c 'echo \$\$ > \"$M0/cancel.pid\"; exec \"$BIN\" run --standalone --agent repo-scout -m \"$CLI_MODEL\" \"\$(cat \"$M0/prompt.txt\")\"'" \
+asg "setsid bash -c 'cd \"$M0\"; echo \$\$ > \"$M0/cancel.pid\"; exec \"$BIN\" run --standalone --agent repo-scout -m \"$CLI_MODEL\" \"\$(cat \"$M0/prompt.txt\")\"'" \
   > "$M0/cancel.log" 2>&1 &
 sleep 6
 CANCEL_PID="$(cat "$M0/cancel.pid" 2>/dev/null || true)"
