@@ -3,3 +3,5 @@ bin/
 .m0/
 .superpowers/
 *.log
+coverage.out
+*.test
