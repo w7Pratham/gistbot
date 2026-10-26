@@ -22,10 +22,46 @@ const testToken = "123456:test-token-not-for-logs"
 
 func newTestClient(t *testing.T, handler http.Handler, opts ...Option) *Client {
 	t.Helper()
+	client, _ := newTestServerClient(t, handler, opts...)
+	return client
+}
+
+// newTestServerClient also returns the server URL so sanitization tests can
+// prove it never appears in an error.
+func newTestServerClient(t *testing.T, handler http.Handler, opts ...Option) (*Client, string) {
+	t.Helper()
 	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		// Force-close connections first so a handler that is waiting on a
+		// cancelled request context cannot block Server.Close.
+		server.CloseClientConnections()
+		server.Close()
+	})
 	all := append([]Option{WithBaseURL(server.URL), WithHTTPClient(server.Client())}, opts...)
-	return New(testToken, all...)
+	return New(testToken, all...), server.URL
+}
+
+// assertSanitizedError pins the redaction contract and rejects an unwrap chain
+// that would let a caller recover the token-bearing request URL.
+func assertSanitizedError(t *testing.T, err error, method, baseURL string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("error is nil")
+	}
+	message := err.Error()
+	if strings.Contains(message, testToken) {
+		t.Error("error message contains the bot token")
+	}
+	if strings.Contains(message, baseURL) {
+		t.Error("error message contains the raw base URL")
+	}
+	if !strings.HasPrefix(message, "telegram "+method+": ") {
+		t.Errorf("error message %q lacks the method prefix", message)
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		t.Error("error chain exposes *url.Error")
+	}
 }
 
 func testContext(t *testing.T) context.Context {
@@ -322,7 +358,112 @@ func TestErrorsNeverContainToken(t *testing.T) {
 		if !strings.HasPrefix(message, "telegram deleteWebhook: ") {
 			t.Errorf("error message %q lacks the method prefix", message)
 		}
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			t.Error("error chain exposes *url.Error")
+		}
 	})
+}
+
+func TestContextCancellationIsClassified(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	var once sync.Once
+	client, baseURL := newTestServerClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(started) })
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() { close(release) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		_, pollErr := client.GetUpdates(ctx, 0, 30*time.Second)
+		result <- pollErr
+	}()
+
+	<-started
+	cancel()
+
+	err := <-result
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want errors.Is(err, context.Canceled)", err)
+	}
+	assertSanitizedError(t, err, "getUpdates", baseURL)
+}
+
+func TestContextDeadlineIsClassified(t *testing.T) {
+	release := make(chan struct{})
+
+	client, baseURL := newTestServerClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() { close(release) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := client.GetUpdates(ctx, 0, 30*time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want errors.Is(err, context.DeadlineExceeded)", err)
+	}
+	assertSanitizedError(t, err, "getUpdates", baseURL)
+}
+
+func TestHTTPClientTimeoutIsClassified(t *testing.T) {
+	release := make(chan struct{})
+
+	client, baseURL := newTestServerClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}), WithHTTPClient(&http.Client{Timeout: 50 * time.Millisecond}))
+	t.Cleanup(func() { close(release) })
+
+	_, err := client.GetUpdates(context.Background(), 0, 30*time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want errors.Is(err, context.DeadlineExceeded) for a client timeout", err)
+	}
+	assertSanitizedError(t, err, "getUpdates", baseURL)
+}
+
+func Test429RetrySleepCancellationIsClassified(t *testing.T) {
+	sleepStarted := make(chan struct{})
+	client, baseURL := newTestServerClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		respond(w, http.StatusTooManyRequests, `{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 30","parameters":{"retry_after":30}}`)
+	}), WithSleep(func(ctx context.Context, d time.Duration) error {
+		close(sleepStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		_, pollErr := client.GetUpdates(ctx, 0, 30*time.Second)
+		result <- pollErr
+	}()
+
+	<-sleepStarted
+	cancel()
+
+	err := <-result
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want errors.Is(err, context.Canceled) after retry sleep", err)
+	}
+	assertSanitizedError(t, err, "getUpdates", baseURL)
 }
 
 func TestEscapeAndTruncateCountsUTF16AndKeepsEntitiesIntact(t *testing.T) {

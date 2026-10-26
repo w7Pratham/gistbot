@@ -159,7 +159,7 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout time.Dura
 // within 4,096 UTF-16 code units.
 func (c *Client) SendMessage(ctx context.Context, chatID int64, html string) error {
 	if utf16Len(html) > maxMessageUTF16 {
-		return fmt.Errorf("telegram %s: %w", methodSendMessage, ErrMessageTooLong)
+		return c.wrap(methodSendMessage, ErrMessageTooLong)
 	}
 
 	form := url.Values{
@@ -370,9 +370,51 @@ func retryAfter(response *http.Response, parameters *apiParameters) time.Duratio
 	return time.Second
 }
 
+// methodError is the error type returned by every Client method. Its message
+// is fully sanitized, and Unwrap exposes only allow-listed sentinel causes so
+// callers can classify cancellation and message-length errors without ever
+// recovering a URL-bearing transport error.
+type methodError struct {
+	method  string
+	message string
+	cause   error
+}
+
+func (e *methodError) Error() string {
+	return "telegram " + e.method + ": " + e.message
+}
+
+func (e *methodError) Unwrap() error {
+	return e.cause
+}
+
 // wrap formats an error as "telegram <method>: <sanitized error>".
 func (c *Client) wrap(method string, err error) error {
-	return fmt.Errorf("telegram %s: %s", method, c.sanitize(err))
+	return &methodError{
+		method:  method,
+		message: c.sanitize(err),
+		cause:   safeCause(err),
+	}
+}
+
+// safeCause returns the only underlying causes that may cross the error
+// boundary. The original *url.Error is deliberately never returned: it carries
+// the token-bearing request URL.
+func safeCause(err error) error {
+	switch {
+	case errors.Is(err, ErrMessageTooLong):
+		return ErrMessageTooLong
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	}
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Timeout() {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // sanitize removes URLs and the bot token from an error before it can be
