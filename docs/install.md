@@ -199,20 +199,41 @@ tokens, passwords, or environment-file contents into the checklist.
 
 ### Access and help
 
-- [ ] Send `/help` from the owner account: the reply lists commands, the
-      current model, the free override, and the runner.
+- [ ] Open the bot chat: the Telegram command menu lists `/gist`, `/status`,
+      `/cancel`, `/list`, `/show`, `/log`, `/model`, `/runner`, and `/help`
+      without typing them first.
+- [ ] Send `/help` from the owner account: the reply is one compact command
+      list with one footer showing the current model, runner, and job state.
 - [ ] Send any command from a non-owner account: no reply is delivered.
+
+### UI and job cards
+
+- [ ] Send `/gist https://github.com/<public-small-repo>`: exactly one job
+      card appears. It is edited in place to `⚡ Running` when the job starts
+      and edited once more to `✅ Gist ready`. No second "Gist ready" message
+      appears.
+- [ ] A successful job delivers exactly one media group containing three
+      documents (`codemap.md`, `routing.md`, `observation.md`); no separate
+      document messages arrive.
+- [ ] Send two `/gist` commands back to back: the second job's initial card says
+      `🕓 Queued #1`, then that same card is edited to `⚡ Running` when the
+      first job finishes. Each job keeps one card.
+- [ ] Force a failed run (for example, `/gist` a nonexistent GitHub repository,
+      or stop the API unit with runner `api` and leave it down): exactly one
+      failure card appears with a short newest-output tail in a `<pre>` block,
+      followed by exactly one `<job>.log` document. No album is sent.
+- [ ] Send `/cancel` during a long job: the same card is edited to
+      `🚫 Cancelled`, includes a short log tail, and attaches the `.log` file.
+      Then run `pgrep -u gistbot -a 'opencode|git'` and confirm it prints
+      nothing.
+- [ ] Send `/status` while a job runs: it shows only the running job and the
+      queue, with the repository, model, runner, and elapsed time.
 
 ### CLI runner
 
 - [ ] With runner `cli`, send `/gist https://github.com/<public-small-repo>`:
-      the bot replies “Started …”, then a summary and three documents
-      (`codemap.md`, `routing.md`, `observation.md`).
-- [ ] While that job runs, `/status` shows the repository, model, runner, and
-      progress; `/list` lists the installed repository after completion.
-- [ ] Start another job and send `/cancel` mid-run: the bot acknowledges the
-      cancel and the job notification reports `cancelled`. Then run
-      `pgrep -u gistbot -a 'opencode|git'` and confirm it prints nothing.
+      the three documents arrive through the CLI runner as the one album.
+- [ ] `/list` lists the installed repository after completion.
 
 ### API runner
 
@@ -223,11 +244,16 @@ tokens, passwords, or environment-file contents into the checklist.
 
 ### Browsing and safety
 
-- [ ] `/show <repo>` returns the installed documents.
-- [ ] `/show <repo> codemap` returns only `codemap.md`.
+- [ ] `/show` with no arguments sends the newest installed repository's
+      documents as one album; `/show <repo>` does the same for an explicit
+      repository.
+- [ ] `/show <repo> codemap` returns only `codemap.md` as a single document.
 - [ ] `/show ../../etc/passwd` is rejected and no file outside `WORK_DIR` is
       read.
-- [ ] `/log` returns a readable `<pre>` block under 4,096 characters.
+- [ ] `/log` returns a compact tail card under 4,096 characters and attaches
+      the full `.log` file.
+- [ ] `/list` shows installed repositories newest first and stays within one
+      Telegram message.
 
 ### Models
 

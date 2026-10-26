@@ -32,6 +32,9 @@ const (
 	testAPIPassword = "test-api-password-not-for-logs"
 	testOwnerID     = int64(4242)
 	testRepoID      = "github__owner__repo"
+	// maxTelegramBytes is a conservative bound for Telegram's 4,096
+	// UTF-16-unit limit: UTF-16 units never exceed UTF-8 bytes.
+	maxTelegramBytes = 4096
 )
 
 func TestRunRegistersCommandMenu(t *testing.T) {
@@ -230,6 +233,261 @@ func TestRunOwnerGistEndToEnd(t *testing.T) {
 	}
 	if strings.Contains(logged, env.cfg.OpenCodeAPIPassword) {
 		t.Error("logs contain the OpenCode API password")
+	}
+}
+
+// TestRunEndToEndEditsOneCardAndSendsAlbum pins the final Telegram UI for a
+// successful job: exactly one initial card, one Running edit of that same
+// card, one final edit, and exactly one album of three documents. It also
+// pins setMyCommands between deleteWebhook and long polling.
+func TestRunEndToEndEditsOneCardAndSendsAlbum(t *testing.T) {
+	fake := newFakeTelegram(t, ownerUpdate(1, "/gist https://github.com/owner/repo"))
+	env := newTestEnv(t, fake.server.URL)
+
+	logs := &syncBuffer{}
+	handle := startRun(t, env.cfg, slog.New(slog.NewTextHandler(logs, nil)))
+
+	waitFor(t, "one gist album", func() bool { return fake.mediaGroupCount() >= 1 })
+	handle.stop(t)
+
+	assertCommandMenuBeforePolling(t, fake)
+
+	messages := fake.messagesCopy()
+	if len(messages) != 1 {
+		t.Fatalf("initial cards = %d, want exactly 1: %+v", len(messages), messages)
+	}
+	initial := messages[0]
+	if initial.id == "" {
+		t.Fatal("fake sendMessage returned no message ID")
+	}
+	for _, want := range []string{"⚡ Running", "owner/repo", "flash", "cli"} {
+		if !strings.Contains(initial.text, want) {
+			t.Errorf("initial card %q does not contain %q", initial.text, want)
+		}
+	}
+
+	edits := fake.editsCopy()
+	if len(edits) != 2 {
+		t.Fatalf("edits = %d, want exactly 2 (Running, final): %+v", len(edits), edits)
+	}
+	for i, edit := range edits {
+		if edit.messageID != initial.id {
+			t.Errorf("edit[%d] targets message %q, want the initial card %q", i, edit.messageID, initial.id)
+		}
+		if edit.chatID != strconv.FormatInt(testOwnerID, 10) {
+			t.Errorf("edit[%d] chat = %q, want %d", i, edit.chatID, testOwnerID)
+		}
+	}
+	if !strings.Contains(edits[0].text, "⚡ Running") {
+		t.Errorf("first edit %q is not the Running card", edits[0].text)
+	}
+	for _, want := range []string{"✅ Gist ready", "owner/repo", "3 docs"} {
+		if !strings.Contains(edits[1].text, want) {
+			t.Errorf("final card %q does not contain %q", edits[1].text, want)
+		}
+	}
+
+	if got := countGistReady(messages, edits); got != 1 {
+		t.Errorf("Gist ready messages = %d, want exactly 1", got)
+	}
+
+	// The card is sent first, edited while running, and the album follows the
+	// final edit. Any interleaved getUpdates polls are irrelevant.
+	sendAt := fake.eventIndex("sendMessage")
+	editAt := fake.eventIndex("editMessageText")
+	albumAt := fake.eventIndex("sendMediaGroup")
+	if sendAt < 0 || editAt < 0 || albumAt < 0 {
+		t.Fatalf("events = %v, want sendMessage, editMessageText, and sendMediaGroup", fake.eventsCopy())
+	}
+	if !(sendAt < editAt && editAt < albumAt) {
+		t.Errorf("events = %v, want sendMessage before editMessageText before sendMediaGroup", fake.eventsCopy())
+	}
+
+	if got := fake.documentCount(); got != 0 {
+		t.Errorf("separate documents = %d, want 0", got)
+	}
+	groups := fake.mediaGroupsCopy()
+	if len(groups) != 1 {
+		t.Fatalf("media groups = %d, want exactly 1", len(groups))
+	}
+	documents := groups[0].documents
+	if len(documents) != 3 {
+		t.Fatalf("album documents = %d, want 3", len(documents))
+	}
+	wantNames := []string{"codemap.md", "routing.md", "observation.md"}
+	for i, document := range documents {
+		if document.filename != wantNames[i] {
+			t.Errorf("album document[%d] = %q, want %q", i, document.filename, wantNames[i])
+		}
+	}
+	for name, want := range map[string]string{
+		"codemap.md":     "codemap\n",
+		"routing.md":     "routing\n",
+		"observation.md": "observation\n",
+	} {
+		found := ""
+		for _, document := range documents {
+			if document.filename == name {
+				found = string(document.data)
+			}
+		}
+		if found != want {
+			t.Errorf("document %s = %q, want %q", name, found, want)
+		}
+	}
+
+	logged := logs.String()
+	if strings.Contains(logged, env.cfg.TelegramToken) {
+		t.Error("logs contain the Telegram token")
+	}
+	if strings.Contains(logged, env.cfg.OpenCodeAPIPassword) {
+		t.Error("logs contain the OpenCode API password")
+	}
+}
+
+// TestRunEndToEndFailureSendsLogFile pins the failure UI: the same card is
+// edited to a failed state with a short log tail, followed by exactly one .log
+// attachment and no album.
+func TestRunEndToEndFailureSendsLogFile(t *testing.T) {
+	t.Setenv("FAKE_EXIT", "1")
+
+	fake := newFakeTelegram(t, ownerUpdate(1, "/gist https://github.com/owner/repo"))
+	env := newTestEnv(t, fake.server.URL)
+
+	logs := &syncBuffer{}
+	handle := startRun(t, env.cfg, slog.New(slog.NewTextHandler(logs, nil)))
+
+	waitFor(t, "failure log attachment", func() bool { return fake.documentCount() >= 1 })
+	handle.stop(t)
+
+	if got := fake.mediaGroupCount(); got != 0 {
+		t.Errorf("media groups = %d, want 0 on failure", got)
+	}
+
+	messages := fake.messagesCopy()
+	if len(messages) != 1 {
+		t.Fatalf("initial cards = %d, want exactly 1: %+v", len(messages), messages)
+	}
+	initial := messages[0]
+	if initial.id == "" {
+		t.Fatal("fake sendMessage returned no message ID")
+	}
+	if !strings.Contains(initial.text, "⚡ Running") {
+		t.Errorf("initial card %q is not the Running card", initial.text)
+	}
+
+	edits := fake.editsCopy()
+	if len(edits) != 2 {
+		t.Fatalf("edits = %d, want exactly 2 (Running, failed): %+v", len(edits), edits)
+	}
+	if !strings.Contains(edits[0].text, "⚡ Running") {
+		t.Errorf("first edit %q is not the Running card", edits[0].text)
+	}
+	failure := edits[1]
+	if failure.messageID != initial.id {
+		t.Errorf("failure edit targets message %q, want the initial card %q", failure.messageID, initial.id)
+	}
+	for _, want := range []string{"❌ Gist failed", "owner/repo", "exit status 1", "<pre>", "Gist complete"} {
+		if !strings.Contains(failure.text, want) {
+			t.Errorf("failure card %q does not contain %q", failure.text, want)
+		}
+	}
+	if size := len(failure.text); size >= maxTelegramBytes {
+		t.Errorf("failure card is %d bytes, want a short tail under %d", size, maxTelegramBytes)
+	}
+
+	if got := countGistFailed(messages, edits); got != 1 {
+		t.Errorf("Gist failed cards = %d, want exactly 1", got)
+	}
+
+	documents := fake.documentsCopy()
+	if len(documents) != 1 {
+		t.Fatalf("documents = %d, want exactly one .log", len(documents))
+	}
+	if !strings.HasSuffix(documents[0].filename, ".log") {
+		t.Errorf("attachment = %q, want a .log file", documents[0].filename)
+	}
+	if !strings.Contains(string(documents[0].data), "Gist complete") {
+		t.Errorf("log attachment %q does not contain the job output", string(documents[0].data))
+	}
+
+	failAt := fake.lastEventIndex("editMessageText")
+	logAt := fake.eventIndex("sendDocument")
+	if failAt < 0 || logAt < 0 {
+		t.Fatalf("events = %v, want editMessageText and sendDocument", fake.eventsCopy())
+	}
+	if failAt > logAt {
+		t.Errorf("events = %v, want the failure card before its .log", fake.eventsCopy())
+	}
+
+	logged := logs.String()
+	if strings.Contains(logged, env.cfg.TelegramToken) {
+		t.Error("logs contain the Telegram token")
+	}
+	if strings.Contains(logged, env.cfg.OpenCodeAPIPassword) {
+		t.Error("logs contain the OpenCode API password")
+	}
+}
+
+// countGistReady counts completion cards across initial sends and edits.
+func countGistReady(messages []sentMessage, edits []sentEdit) int {
+	count := 0
+	for _, message := range messages {
+		if strings.Contains(message.text, "Gist ready") {
+			count++
+		}
+	}
+	for _, edit := range edits {
+		if strings.Contains(edit.text, "Gist ready") {
+			count++
+		}
+	}
+	return count
+}
+
+// countGistFailed counts failure cards across initial sends and edits.
+func countGistFailed(messages []sentMessage, edits []sentEdit) int {
+	count := 0
+	for _, message := range messages {
+		if strings.Contains(message.text, "Gist failed") {
+			count++
+		}
+	}
+	for _, edit := range edits {
+		if strings.Contains(edit.text, "Gist failed") {
+			count++
+		}
+	}
+	return count
+}
+
+// assertCommandMenuBeforePolling verifies the command menu is registered once,
+// after deleteWebhook and before the first getUpdates.
+func assertCommandMenuBeforePolling(t *testing.T, fake *fakeTelegram) {
+	t.Helper()
+
+	if got := fake.commandCallsCount(); got != 1 {
+		t.Errorf("setMyCommands calls = %d, want exactly 1", got)
+	}
+	deleteAt := fake.eventIndex("deleteWebhook")
+	setAt := fake.eventIndex("setMyCommands")
+	pollAt := fake.eventIndex("getUpdates")
+	if deleteAt < 0 || setAt < 0 || pollAt < 0 {
+		t.Fatalf("events = %v, want deleteWebhook, setMyCommands, and getUpdates", fake.eventsCopy())
+	}
+	if !(deleteAt < setAt && setAt < pollAt) {
+		t.Errorf("events = %v, want setMyCommands after deleteWebhook and before polling", fake.eventsCopy())
+	}
+
+	got := fake.commandsCopy()
+	want := bot.CommandMenu()
+	if len(got) != len(want) {
+		t.Fatalf("registered commands = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("command[%d] = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
 
@@ -518,6 +776,7 @@ func waitFor(t *testing.T, what string, condition func() bool) {
 }
 
 type sentMessage struct {
+	id     string
 	chatID string
 	text   string
 }
@@ -547,16 +806,17 @@ type fakeTelegram struct {
 	updates []telegram.Update
 	closed  chan struct{}
 
-	mu          sync.Mutex
-	deleteCalls int
-	deleteCode  int
-	deleteDesc  string
-	pollOffsets []int64
-	messages    []sentMessage
-	edits       []sentEdit
-	documents   []sentDocument
-	mediaGroups []sentMediaGroup
-	events      []string
+	mu            sync.Mutex
+	deleteCalls   int
+	deleteCode    int
+	deleteDesc    string
+	pollOffsets   []int64
+	nextMessageID int64
+	messages      []sentMessage
+	edits         []sentEdit
+	documents     []sentDocument
+	mediaGroups   []sentMediaGroup
+	events        []string
 
 	commandCalls int
 	commandCode  int
@@ -693,12 +953,16 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.mu.Lock()
+		f.nextMessageID++
+		id := f.nextMessageID
 		f.messages = append(f.messages, sentMessage{
+			id:     strconv.FormatInt(id, 10),
 			chatID: r.PostForm.Get("chat_id"),
 			text:   r.PostForm.Get("text"),
 		})
+		f.events = append(f.events, "sendMessage")
 		f.mu.Unlock()
-		writeTelegramResult(w, `{"message_id":1}`)
+		writeTelegramResult(w, fmt.Sprintf(`{"message_id":%d}`, id))
 
 	case "sendDocument":
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
@@ -723,6 +987,7 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		f.documents = append(f.documents, document)
+		f.events = append(f.events, "sendDocument")
 		f.mu.Unlock()
 		writeTelegramResult(w, `{"message_id":2}`)
 
@@ -737,6 +1002,7 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			messageID: r.PostForm.Get("message_id"),
 			text:      r.PostForm.Get("text"),
 		})
+		f.events = append(f.events, "editMessageText")
 		f.mu.Unlock()
 		writeTelegramResult(w, "true")
 
@@ -779,6 +1045,7 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		f.mediaGroups = append(f.mediaGroups, group)
+		f.events = append(f.events, "sendMediaGroup")
 		f.mu.Unlock()
 		writeTelegramResult(w, `[{"message_id":3}]`)
 
@@ -833,6 +1100,18 @@ func (f *fakeTelegram) eventIndex(name string) int {
 	defer f.mu.Unlock()
 	for i, event := range f.events {
 		if event == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// lastEventIndex returns the index of the last recorded event with name, or -1.
+func (f *fakeTelegram) lastEventIndex(name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.events) - 1; i >= 0; i-- {
+		if f.events[i] == name {
 			return i
 		}
 	}

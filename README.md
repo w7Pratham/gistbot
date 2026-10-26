@@ -9,9 +9,10 @@ user, paths, state files, and service units.
 
 Zero Two is implemented: the owner-gated Telegram client and long-poll loop,
 the job manager and queue, the CLI and API runners, repository cloning,
-persisted model and runner selection, document browsing, and the systemd
-deployment are all in place. The automated suite runs with `make test` and
-`make test-race`.
+persisted model and runner selection, document browsing, the compact card UI,
+and the systemd deployment are all in place. The automated suite runs with
+`make test` and `make test-race`; the end-to-end tests in `cmd/gistbot` pin the
+one-card, one-album success shape and the failure tail plus `.log` attachment.
 
 The remaining step is manual acceptance on a phone against the live bot. The
 checklist in `docs/install.md` has **not** been performed in this checkout;
@@ -90,6 +91,33 @@ override is supplied.
 `config.Load` reads only the getter it is given, so tests and the production
 systemd environment behave the same way. Errors name the offending variable but
 never print its value.
+
+## Telegram UI
+
+One job owns one card. It is sent when `/gist` is accepted (`⚡ Running`, or
+`🕓 Queued #n` when work is already in progress), edited to `⚡ Running` when
+the worker starts it, and edited once more to its terminal state. A successful
+job never sends a second summary message.
+
+- **Success:** the final card shows the duration and document count, then the
+  three gist documents arrive as one media group in canonical order
+  (`codemap.md`, `routing.md`, `observation.md`). A partial run reports the
+  missing documents on the card; a single document is sent alone, and an album
+  rejected by Telegram falls back to paced separate documents.
+- **Failure, cancel, or timeout:** the same card is edited with the status,
+  error, duration, and the newest log lines in a short `<pre>` tail. Exactly one
+  `<job>.log` attachment follows (capped at the most recent 5 MiB). No album is
+  sent.
+- **Command menu:** `/gist`, `/status`, `/cancel`, `/list`, `/show`, `/log`,
+  `/model`, `/runner`, and `/help` are registered once after the webhook is
+  deleted and before long polling starts. A menu failure is logged and does not
+  stop the bot.
+- **Browsing:** `/status` shows only the running job and queue. `/list` is
+  newest first and bounded to one Telegram message. `/show` with no arguments
+  resends the newest installed repository's documents; `/show repo doc` sends
+  one document. `/log` returns a compact tail card plus the `.log` file.
+- **No buttons:** the UI uses text commands only; there are no inline keyboards
+  or callback queries.
 
 ## Commands
 
