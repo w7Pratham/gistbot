@@ -105,11 +105,18 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	// is completed before Start launches the worker, so a notification can
 	// never observe a nil bot.
 	var handler *bot.Bot
-	notifier := notifierFunc(func(notifyCtx context.Context, result jobs.Result) {
-		if handler != nil {
-			handler.Notify(notifyCtx, result)
-		}
-	})
+	notifier := notifierFunc{
+		notify: func(notifyCtx context.Context, result jobs.Result) {
+			if handler != nil {
+				handler.Notify(notifyCtx, result)
+			}
+		},
+		notifyStarted: func(notifyCtx context.Context, req jobs.Request) {
+			if handler != nil {
+				handler.NotifyStarted(notifyCtx, req)
+			}
+		},
+	}
 	manager := jobs.NewManager(cfg, store, cloner, runners, notifier, logger)
 
 	handler = bot.New(cfg, store, manager, telegramClient, cfg.OwnerUserID,
@@ -132,11 +139,23 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	return nil
 }
 
-// notifierFunc adapts a function to jobs.Notifier without exposing the
-// manager's construction order to callers.
-type notifierFunc func(context.Context, jobs.Result)
+// notifierFunc adapts functions to jobs.Notifier and jobs.StartNotifier
+// without exposing the manager's construction order to callers.
+type notifierFunc struct {
+	notify        func(context.Context, jobs.Result)
+	notifyStarted func(context.Context, jobs.Request)
+}
 
 // Notify implements jobs.Notifier.
 func (f notifierFunc) Notify(ctx context.Context, result jobs.Result) {
-	f(ctx, result)
+	if f.notify != nil {
+		f.notify(ctx, result)
+	}
+}
+
+// NotifyStarted implements jobs.StartNotifier.
+func (f notifierFunc) NotifyStarted(ctx context.Context, req jobs.Request) {
+	if f.notifyStarted != nil {
+		f.notifyStarted(ctx, req)
+	}
 }

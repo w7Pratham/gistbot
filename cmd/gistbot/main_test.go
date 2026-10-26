@@ -94,28 +94,51 @@ func TestRunOwnerGistEndToEnd(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(logs, nil))
 	handle := startRun(t, env.cfg, logger)
 
-	waitFor(t, "three gist documents", func() bool { return fake.documentCount() >= 3 })
+	waitFor(t, "one gist album", func() bool { return fake.mediaGroupCount() >= 1 })
 	handle.stop(t)
 
 	messages := fake.messagesCopy()
-	summary := ""
+	initial := ""
 	for _, message := range messages {
-		if strings.Contains(message.text, "Gist complete") {
-			summary = message.text
+		if strings.Contains(message.text, "⚡ Running") {
+			initial = message.text
+		}
+	}
+	if initial == "" {
+		t.Fatalf("no running card in %d messages", len(messages))
+	}
+	for _, want := range []string{"⚡ Running", "owner/repo", "flash", "cli"} {
+		if !strings.Contains(initial, want) {
+			t.Errorf("initial card %q does not contain %q", initial, want)
+		}
+	}
+
+	edits := fake.editsCopy()
+	summary := ""
+	for _, edit := range edits {
+		if strings.Contains(edit.text, "Gist ready") {
+			summary = edit.text
 		}
 	}
 	if summary == "" {
-		t.Fatalf("no completion summary in %d messages", len(messages))
+		t.Fatalf("no completion card in %d edits", len(edits))
 	}
-	for _, want := range []string{"Gist complete", "owner/repo", "docs: codemap, routing, observation"} {
+	for _, want := range []string{"Gist ready", "owner/repo", "3 docs"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("summary %q does not contain %q", summary, want)
 		}
 	}
 
-	documents := fake.documentsCopy()
+	groups := fake.mediaGroupsCopy()
+	if len(groups) != 1 {
+		t.Fatalf("media groups = %d, want 1", len(groups))
+	}
+	documents := groups[0].documents
 	if len(documents) != 3 {
-		t.Fatalf("sent documents = %d, want 3", len(documents))
+		t.Fatalf("album documents = %d, want 3", len(documents))
+	}
+	if got := fake.documentCount(); got != 0 {
+		t.Errorf("separate documents = %d, want 0", got)
 	}
 	contents := make(map[string]string, len(documents))
 	for _, document := range documents {
@@ -434,10 +457,21 @@ type sentMessage struct {
 	text   string
 }
 
+type sentEdit struct {
+	chatID    string
+	messageID string
+	text      string
+}
+
 type sentDocument struct {
 	chatID   string
 	filename string
 	data     []byte
+}
+
+type sentMediaGroup struct {
+	chatID    string
+	documents []sentDocument
 }
 
 // fakeTelegram is an in-process Bot API subset. It blocks getUpdates until the
@@ -454,7 +488,9 @@ type fakeTelegram struct {
 	deleteDesc  string
 	pollOffsets []int64
 	messages    []sentMessage
+	edits       []sentEdit
 	documents   []sentDocument
+	mediaGroups []sentMediaGroup
 }
 
 func newFakeTelegram(t *testing.T, updates ...telegram.Update) *fakeTelegram {
@@ -579,6 +615,62 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		writeTelegramResult(w, `{"message_id":2}`)
 
+	case "editMessageText":
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.edits = append(f.edits, sentEdit{
+			chatID:    r.PostForm.Get("chat_id"),
+			messageID: r.PostForm.Get("message_id"),
+			text:      r.PostForm.Get("text"),
+		})
+		f.mu.Unlock()
+		writeTelegramResult(w, "true")
+
+	case "sendMediaGroup":
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			http.Error(w, "invalid multipart form", http.StatusBadRequest)
+			return
+		}
+		var media []struct {
+			Media string `json:"media"`
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("media")), &media); err != nil {
+			http.Error(w, "invalid media", http.StatusBadRequest)
+			return
+		}
+		group := sentMediaGroup{chatID: r.FormValue("chat_id")}
+		for _, item := range media {
+			field := strings.TrimPrefix(item.Media, "attach://")
+			files := r.MultipartForm.File[field]
+			if len(files) == 0 {
+				http.Error(w, "missing media file", http.StatusBadRequest)
+				return
+			}
+			file, err := files[0].Open()
+			if err != nil {
+				http.Error(w, "open media file", http.StatusInternalServerError)
+				return
+			}
+			data, readErr := io.ReadAll(file)
+			_ = file.Close()
+			if readErr != nil {
+				http.Error(w, "read media file", http.StatusInternalServerError)
+				return
+			}
+			group.documents = append(group.documents, sentDocument{
+				chatID:   group.chatID,
+				filename: files[0].Filename,
+				data:     data,
+			})
+		}
+		f.mu.Lock()
+		f.mediaGroups = append(f.mediaGroups, group)
+		f.mu.Unlock()
+		writeTelegramResult(w, `[{"message_id":3}]`)
+
 	default:
 		http.NotFound(w, r)
 	}
@@ -616,6 +708,30 @@ func (f *fakeTelegram) messagesCopy() []sentMessage {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]sentMessage(nil), f.messages...)
+}
+
+func (f *fakeTelegram) editsCopy() []sentEdit {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]sentEdit(nil), f.edits...)
+}
+
+func (f *fakeTelegram) mediaGroupCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.mediaGroups)
+}
+
+func (f *fakeTelegram) mediaGroupsCopy() []sentMediaGroup {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	groups := make([]sentMediaGroup, len(f.mediaGroups))
+	for i, group := range f.mediaGroups {
+		copied := sentMediaGroup{chatID: group.chatID}
+		copied.documents = append([]sentDocument(nil), group.documents...)
+		groups[i] = copied
+	}
+	return groups
 }
 
 func (f *fakeTelegram) documentCount() int {

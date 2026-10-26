@@ -28,10 +28,23 @@ const (
 
 var fixedNow = time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 
-// messageSend and documentSend record one fake Telegram send.
+// messageSend, editSend, mediaGroupSend, and documentSend record one fake
+// Telegram call each.
 type messageSend struct {
 	chatID int64
 	html   string
+	id     int64
+}
+
+type editSend struct {
+	chatID    int64
+	messageID int64
+	html      string
+}
+
+type mediaGroupSend struct {
+	chatID int64
+	docs   []telegram.Document
 }
 
 type documentSend struct {
@@ -40,20 +53,64 @@ type documentSend struct {
 	data     []byte
 }
 
-// fakeSender records outgoing Telegram traffic.
+// fakeSender records outgoing Telegram traffic by method so card edits, albums,
+// and single documents can be asserted independently and in order.
 type fakeSender struct {
-	mu          sync.Mutex
-	messages    []messageSend
-	documents   []documentSend
-	messageErr  error
-	documentErr error
+	mu        sync.Mutex
+	messages  []messageSend
+	edits     []editSend
+	groups    []mediaGroupSend
+	documents []documentSend
+	events    []string
+
+	messageErr    error
+	editErr       error
+	mediaGroupErr error
+	documentErr   error
+
+	nextMessageID   int64
+	editHasDeadline []bool
 }
 
-func (s *fakeSender) SendMessage(_ context.Context, chatID int64, html string) error {
+func (s *fakeSender) SendMessage(ctx context.Context, chatID int64, html string) error {
+	_, err := s.SendMessageID(ctx, chatID, html)
+	return err
+}
+
+func (s *fakeSender) SendMessageID(_ context.Context, chatID int64, html string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.messages = append(s.messages, messageSend{chatID: chatID, html: html})
-	return s.messageErr
+	s.nextMessageID++
+	id := s.nextMessageID
+	s.messages = append(s.messages, messageSend{chatID: chatID, html: html, id: id})
+	s.events = append(s.events, "sendMessageID")
+	return id, s.messageErr
+}
+
+func (s *fakeSender) EditMessageText(ctx context.Context, chatID, messageID int64, html string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, hasDeadline := ctx.Deadline()
+	s.editHasDeadline = append(s.editHasDeadline, hasDeadline)
+	s.edits = append(s.edits, editSend{chatID: chatID, messageID: messageID, html: html})
+	s.events = append(s.events, "editMessageText")
+	return s.editErr
+}
+
+func (s *fakeSender) SendMediaGroup(_ context.Context, chatID int64, docs []telegram.Document) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copied := make([]telegram.Document, len(docs))
+	for i, doc := range docs {
+		copied[i] = telegram.Document{
+			Filename: doc.Filename,
+			Data:     append([]byte(nil), doc.Data...),
+			Caption:  doc.Caption,
+		}
+	}
+	s.groups = append(s.groups, mediaGroupSend{chatID: chatID, docs: copied})
+	s.events = append(s.events, "sendMediaGroup")
+	return s.mediaGroupErr
 }
 
 func (s *fakeSender) SendDocument(_ context.Context, chatID int64, filename string, data []byte) error {
@@ -62,6 +119,7 @@ func (s *fakeSender) SendDocument(_ context.Context, chatID int64, filename stri
 	kept := make([]byte, len(data))
 	copy(kept, data)
 	s.documents = append(s.documents, documentSend{chatID: chatID, filename: filename, data: kept})
+	s.events = append(s.events, "sendDocument:"+filename)
 	return s.documentErr
 }
 
@@ -75,10 +133,40 @@ func (s *fakeSender) messageTexts() []string {
 	return texts
 }
 
+func (s *fakeSender) sentMessages() []messageSend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]messageSend(nil), s.messages...)
+}
+
+func (s *fakeSender) sentEdits() []editSend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]editSend(nil), s.edits...)
+}
+
+func (s *fakeSender) sentGroups() []mediaGroupSend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]mediaGroupSend(nil), s.groups...)
+}
+
 func (s *fakeSender) sentDocuments() []documentSend {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]documentSend(nil), s.documents...)
+}
+
+func (s *fakeSender) eventLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.events...)
+}
+
+func (s *fakeSender) editsHadDeadline() []bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]bool(nil), s.editHasDeadline...)
 }
 
 // fakeJobs records enqueue, status, and cancel calls.
@@ -199,6 +287,30 @@ func (f *botFixture) setModel(t *testing.T, alias string) {
 	if err := f.store.SetModel(alias); err != nil {
 		t.Fatalf("SetModel(%q): %v", alias, err)
 	}
+}
+
+// enqueueGist runs /gist and returns the request the fake manager accepted.
+func (f *botFixture) enqueueGist(url string) jobs.Request {
+	f.t.Helper()
+	f.handle(privateUpdate("/gist " + url))
+	requests := f.jobs.requestList()
+	if len(requests) == 0 {
+		f.t.Fatal("no request was enqueued")
+	}
+	return requests[len(requests)-1]
+}
+
+// plainCard removes the small markup used by cards so the approved text shape
+// can be asserted directly.
+func plainCard(html string) string {
+	return strings.NewReplacer(
+		"<b>", "",
+		"</b>", "",
+		"<code>", "",
+		"</code>", "",
+		"<pre>", "",
+		"</pre>", "",
+	).Replace(html)
 }
 
 func privateUpdate(text string) telegram.Update {
@@ -400,7 +512,9 @@ func TestGistValidEnqueuesWithRunnerAndModel(t *testing.T) {
 		if len(texts) != 1 {
 			t.Fatalf("messages = %d, want 1", len(texts))
 		}
-		requireContains(t, texts[0], "Started Example/Project · flash · api")
+		card := plainCard(texts[0])
+		requireContains(t, card, "⚡ Running · Example/Project")
+		requireContains(t, card, "flash · api")
 	})
 
 	t.Run("free override", func(t *testing.T) {
@@ -428,7 +542,7 @@ func TestGistValidEnqueuesWithRunnerAndModel(t *testing.T) {
 		if len(texts) != 1 {
 			t.Fatalf("messages = %d, want 1", len(texts))
 		}
-		requireContains(t, texts[0], "free (vendor/model#high)")
+		requireContains(t, plainCard(texts[0]), "free (vendor/model#high)")
 	})
 
 	t.Run("queued position", func(t *testing.T) {
@@ -441,8 +555,9 @@ func TestGistValidEnqueuesWithRunnerAndModel(t *testing.T) {
 		if len(texts) != 1 {
 			t.Fatalf("messages = %d, want 1", len(texts))
 		}
-		requireContains(t, texts[0], "Queued #2")
-		requireContains(t, texts[0], "example/other")
+		card := plainCard(texts[0])
+		requireContains(t, card, "🕓 Queued #2")
+		requireContains(t, card, "example/other")
 	})
 }
 
@@ -608,82 +723,208 @@ func TestCancelRunning(t *testing.T) {
 	}
 }
 
-func TestNotifySuccessSendsSummaryAndThreeDocs(t *testing.T) {
+func TestGistQueuedCardIsStored(t *testing.T) {
+	t.Run("queued", func(t *testing.T) {
+		f := newBotFixture(t)
+		f.jobs.position = 2
+
+		req := f.enqueueGist("https://github.com/example/other")
+
+		messages := f.sender.sentMessages()
+		if len(messages) != 1 {
+			t.Fatalf("messages = %d, want 1", len(messages))
+		}
+		want := "🕓 Queued #2 · example/other\nflash · cli"
+		if got := plainCard(messages[0].html); got != want {
+			t.Errorf("card = %q, want %q", got, want)
+		}
+
+		id, ok := f.bot.cardID(req.ID)
+		if !ok {
+			t.Fatalf("no card stored for %q", req.ID)
+		}
+		if id != messages[0].id {
+			t.Errorf("stored card ID = %d, want %d", id, messages[0].id)
+		}
+	})
+
+	t.Run("running", func(t *testing.T) {
+		f := newBotFixture(t)
+
+		req := f.enqueueGist("https://github.com/example/project")
+
+		messages := f.sender.sentMessages()
+		if len(messages) != 1 {
+			t.Fatalf("messages = %d, want 1", len(messages))
+		}
+		want := "⚡ Running · example/project\nflash · cli · started " + fixedNow.Format("15:04")
+		if got := plainCard(messages[0].html); got != want {
+			t.Errorf("card = %q, want %q", got, want)
+		}
+		if id, ok := f.bot.cardID(req.ID); !ok || id != messages[0].id {
+			t.Errorf("stored card = %d, %v; want %d, true", id, ok, messages[0].id)
+		}
+	})
+
+	t.Run("send failure still queues", func(t *testing.T) {
+		f := newBotFixture(t)
+		f.sender.messageErr = errors.New("telegram unavailable")
+
+		req := f.enqueueGist("https://github.com/example/project")
+
+		if got := len(f.jobs.requestList()); got != 1 {
+			t.Errorf("enqueued requests = %d, want 1", got)
+		}
+		if _, ok := f.bot.cardID(req.ID); ok {
+			t.Error("a card ID was stored after a failed send")
+		}
+	})
+}
+
+func TestNotifyStartedEditsQueuedCardToRunning(t *testing.T) {
 	f := newBotFixture(t)
+	f.jobs.position = 2
+	req := f.enqueueGist("https://github.com/example/other")
+
+	f.bot.NotifyStarted(context.Background(), req)
+
+	messages := f.sender.sentMessages()
+	edits := f.sender.sentEdits()
+	if len(edits) != 1 {
+		t.Fatalf("edits = %d, want 1", len(edits))
+	}
+	if edits[0].chatID != testChatID {
+		t.Errorf("edit chat ID = %d, want %d", edits[0].chatID, testChatID)
+	}
+	if edits[0].messageID != messages[0].id {
+		t.Errorf("edited message = %d, want %d", edits[0].messageID, messages[0].id)
+	}
+	want := "⚡ Running · example/other\nflash · cli · started " + fixedNow.Format("15:04")
+	if got := plainCard(edits[0].html); got != want {
+		t.Errorf("card = %q, want %q", got, want)
+	}
+	if got := f.sender.editsHadDeadline(); len(got) != 1 || !got[0] {
+		t.Errorf("start edit context deadlines = %v, want one bounded edit", got)
+	}
+	if got := len(f.sender.messageTexts()); got != 1 {
+		t.Errorf("messages = %d, want the initial card only", got)
+	}
+}
+
+func TestNotifyStartedWithoutCardDoesNothing(t *testing.T) {
+	f := newBotFixture(t)
+
+	f.bot.NotifyStarted(context.Background(), jobs.Request{
+		ID:     "job-restart",
+		ChatID: testChatID,
+		Runner: jobs.RunnerCLI,
+	})
+
+	if got := len(f.sender.sentEdits()); got != 0 {
+		t.Errorf("edits = %d, want 0", got)
+	}
+	if got := len(f.sender.messageTexts()); got != 0 {
+		t.Errorf("messages = %d, want 0", got)
+	}
+}
+
+func TestNotifySuccessEditsCardAndSendsAlbum(t *testing.T) {
+	f := newBotFixture(t)
+	req := f.enqueueGist("https://github.com/example/project")
 	docs := writeGistDocs(t, map[string]string{
 		"codemap":     "CODEMAP",
 		"routing":     "ROUTING",
 		"observation": "OBSERVATION",
 	})
 
-	f.bot.Notify(context.Background(), testResult(docs))
+	res := testResult(docs)
+	res.Request = req
+	f.bot.Notify(context.Background(), res)
 
-	texts := f.sender.messageTexts()
-	if len(texts) != 1 {
-		t.Fatalf("messages = %d, want 1", len(texts))
+	messages := f.sender.sentMessages()
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want the initial card only", len(messages))
 	}
-	for _, want := range []string{
-		"<pre>", "example/project", "flash", "cli", "1m30s",
-		"codemap", "routing", "observation",
-	} {
-		requireContains(t, texts[0], want)
+	edits := f.sender.sentEdits()
+	if len(edits) != 1 {
+		t.Fatalf("edits = %d, want 1", len(edits))
 	}
-	requireNotContains(t, texts[0], "Missing")
+	if edits[0].messageID != messages[0].id {
+		t.Errorf("edited message = %d, want %d", edits[0].messageID, messages[0].id)
+	}
+	want := "✅ Gist ready · example/project\nflash · cli · 1m 30s · 3 docs"
+	if got := plainCard(edits[0].html); got != want {
+		t.Errorf("card = %q, want %q", got, want)
+	}
+	if _, ok := f.bot.cardID(req.ID); ok {
+		t.Error("card entry was not removed after the final card")
+	}
 
-	sent := f.sender.sentDocuments()
-	if len(sent) != 3 {
-		t.Fatalf("documents = %d, want 3", len(sent))
+	groups := f.sender.sentGroups()
+	if len(groups) != 1 {
+		t.Fatalf("media groups = %d, want 1", len(groups))
+	}
+	if groups[0].chatID != testChatID {
+		t.Errorf("album chat ID = %d, want %d", groups[0].chatID, testChatID)
 	}
 	wantNames := []string{"codemap.md", "routing.md", "observation.md"}
 	wantBodies := []string{"CODEMAP", "ROUTING", "OBSERVATION"}
-	for i, doc := range sent {
-		if doc.chatID != testChatID {
-			t.Errorf("document[%d] chatID = %d, want %d", i, doc.chatID, testChatID)
+	if len(groups[0].docs) != len(wantNames) {
+		t.Fatalf("album docs = %d, want %d", len(groups[0].docs), len(wantNames))
+	}
+	for i, doc := range groups[0].docs {
+		if doc.Filename != wantNames[i] {
+			t.Errorf("album[%d] filename = %q, want %q", i, doc.Filename, wantNames[i])
 		}
-		if doc.filename != wantNames[i] {
-			t.Errorf("document[%d] filename = %q, want %q", i, doc.filename, wantNames[i])
-		}
-		if string(doc.data) != wantBodies[i] {
-			t.Errorf("document[%d] body = %q, want %q", i, doc.data, wantBodies[i])
+		if string(doc.Data) != wantBodies[i] {
+			t.Errorf("album[%d] body = %q, want %q", i, doc.Data, wantBodies[i])
 		}
 	}
-
-	if len(f.sleeps) != 3 {
-		t.Fatalf("sleeps = %d, want 3", len(f.sleeps))
+	if got := len(f.sender.sentDocuments()); got != 0 {
+		t.Errorf("separate documents = %d, want 0", got)
 	}
-	for i, d := range f.sleeps {
-		if d != time.Second {
-			t.Errorf("sleep[%d] = %v, want 1s", i, d)
-		}
+	if len(f.sleeps) != 0 {
+		t.Errorf("sleeps = %v, want none for one album", f.sleeps)
+	}
+	wantEvents := []string{"sendMessageID", "editMessageText", "sendMediaGroup"}
+	if got := f.sender.eventLog(); !equalStrings(got, wantEvents) {
+		t.Errorf("events = %v, want %v", got, wantEvents)
 	}
 }
 
-func TestNotifyPartialSendsAvailableDocsAndWarning(t *testing.T) {
+func TestNotifyPartialSendsAlbumAndMissingFooter(t *testing.T) {
 	f := newBotFixture(t)
-	docs := writeGistDocs(t, map[string]string{"codemap": "CODEMAP"})
+	req := f.enqueueGist("https://github.com/example/project")
+	docs := writeGistDocs(t, map[string]string{
+		"codemap": "CODEMAP",
+		"routing": "ROUTING",
+	})
 
-	f.bot.Notify(context.Background(), testResult(docs))
+	res := testResult(docs)
+	res.Request = req
+	f.bot.Notify(context.Background(), res)
 
-	texts := f.sender.messageTexts()
-	if len(texts) != 1 {
-		t.Fatalf("messages = %d, want 1", len(texts))
+	edits := f.sender.sentEdits()
+	if len(edits) != 1 {
+		t.Fatalf("edits = %d, want 1", len(edits))
 	}
-	requireContains(t, texts[0], "Missing: routing, observation")
+	card := plainCard(edits[0].html)
+	requireContains(t, card, "✅ Gist ready · example/project")
+	requireContains(t, card, "flash · cli · 1m 30s · 2 docs")
+	requireContains(t, card, "Missing: observation")
 
-	sent := f.sender.sentDocuments()
-	if len(sent) != 1 {
-		t.Fatalf("documents = %d, want 1", len(sent))
+	groups := f.sender.sentGroups()
+	if len(groups) != 1 {
+		t.Fatalf("media groups = %d, want 1", len(groups))
 	}
-	if sent[0].filename != "codemap.md" {
-		t.Errorf("document filename = %q, want codemap.md", sent[0].filename)
-	}
-	if string(sent[0].data) != "CODEMAP" {
-		t.Errorf("document body = %q, want CODEMAP", sent[0].data)
+	if len(groups[0].docs) != 2 {
+		t.Fatalf("album docs = %d, want 2", len(groups[0].docs))
 	}
 }
 
-func TestNotifyFailureSendsLogTail(t *testing.T) {
+func TestNotifyFailureEditsCardAndSendsLogFile(t *testing.T) {
 	f := newBotFixture(t)
+	req := f.enqueueGist("https://github.com/example/project")
 
 	var log strings.Builder
 	for i := 1; i <= 30; i++ {
@@ -700,28 +941,194 @@ func TestNotifyFailureSendsLogTail(t *testing.T) {
 	}
 
 	res := testResult(repo.Docs{})
+	res.Request = req
 	res.Status = state.StatusFailed
 	res.Err = errors.New("clone failed")
 	res.LogPath = logPath
 
 	f.bot.Notify(context.Background(), res)
 
-	texts := f.sender.messageTexts()
-	if len(texts) != 1 {
-		t.Fatalf("messages = %d, want 1", len(texts))
+	edits := f.sender.sentEdits()
+	if len(edits) != 1 {
+		t.Fatalf("edits = %d, want 1", len(edits))
 	}
-	text := texts[0]
-	for _, want := range []string{"failed", "clone failed", "<pre>", "line-11", "line-29", "line-30"} {
+	text := edits[0].html
+	for _, want := range []string{
+		"clone failed",
+		"flash · cli · 1m 30s",
+		"<pre>",
+		"line-21",
+		"line-29",
+		"line-30",
+	} {
 		requireContains(t, text, want)
 	}
-	requireNotContains(t, text, "line-10")
+	requireContains(t, plainCard(text), "❌ Gist failed · example/project")
+	requireNotContains(t, text, "line-20")
 	requireNotContains(t, text, "\x1b[")
-	if got := len(f.sender.sentDocuments()); got != 0 {
-		t.Errorf("documents = %d, want 0", got)
+	if _, ok := f.bot.cardID(req.ID); ok {
+		t.Error("card entry was not removed after the failure card")
+	}
+
+	sent := f.sender.sentDocuments()
+	if len(sent) != 1 {
+		t.Fatalf("documents = %d, want the job log only", len(sent))
+	}
+	if sent[0].filename != req.ID+".log" {
+		t.Errorf("log filename = %q, want %q", sent[0].filename, req.ID+".log")
+	}
+	if string(sent[0].data) != log.String() {
+		t.Error("log attachment does not match the full job log")
 	}
 }
 
-func TestNotifyHTMLIsEscaped(t *testing.T) {
+func TestNotifyMissingCardSendsNewCard(t *testing.T) {
+	f := newBotFixture(t)
+	docs := writeGistDocs(t, map[string]string{
+		"codemap":     "CODEMAP",
+		"routing":     "ROUTING",
+		"observation": "OBSERVATION",
+	})
+
+	f.bot.Notify(context.Background(), testResult(docs))
+
+	if got := len(f.sender.sentEdits()); got != 0 {
+		t.Errorf("edits = %d, want 0 without a stored card", got)
+	}
+	messages := f.sender.sentMessages()
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want one final card", len(messages))
+	}
+	want := "✅ Gist ready · example/project\nflash · cli · 1m 30s · 3 docs"
+	if got := plainCard(messages[0].html); got != want {
+		t.Errorf("card = %q, want %q", got, want)
+	}
+	if got := len(f.sender.sentGroups()); got != 1 {
+		t.Errorf("media groups = %d, want 1", got)
+	}
+}
+
+func TestNotifyEditFailureSendsNewCard(t *testing.T) {
+	f := newBotFixture(t)
+	req := f.enqueueGist("https://github.com/example/project")
+	f.sender.editErr = errors.New("message to edit not found")
+	docs := writeGistDocs(t, map[string]string{
+		"codemap":     "CODEMAP",
+		"routing":     "ROUTING",
+		"observation": "OBSERVATION",
+	})
+
+	res := testResult(docs)
+	res.Request = req
+	f.bot.Notify(context.Background(), res)
+
+	if got := len(f.sender.sentEdits()); got != 1 {
+		t.Fatalf("edits = %d, want 1 failed edit", got)
+	}
+	messages := f.sender.sentMessages()
+	if len(messages) != 2 {
+		t.Fatalf("messages = %d, want initial card plus fallback card", len(messages))
+	}
+	if got := plainCard(messages[1].html); !strings.HasPrefix(got, "✅ Gist ready") {
+		t.Errorf("fallback card = %q, want a Gist ready card", got)
+	}
+	if got := len(f.sender.sentGroups()); got != 1 {
+		t.Errorf("media groups = %d, want 1", got)
+	}
+}
+
+func TestAlbumFallsBackToSeparateDocuments(t *testing.T) {
+	f := newBotFixture(t)
+	req := f.enqueueGist("https://github.com/example/project")
+	f.sender.mediaGroupErr = errors.New("media group rejected")
+	docs := writeGistDocs(t, map[string]string{
+		"codemap":     "CODEMAP",
+		"routing":     "ROUTING",
+		"observation": "OBSERVATION",
+	})
+
+	res := testResult(docs)
+	res.Request = req
+	f.bot.Notify(context.Background(), res)
+
+	if got := len(f.sender.sentGroups()); got != 1 {
+		t.Errorf("media group attempts = %d, want 1", got)
+	}
+	sent := f.sender.sentDocuments()
+	if len(sent) != 3 {
+		t.Fatalf("documents = %d, want 3 fallbacks", len(sent))
+	}
+	wantNames := []string{"codemap.md", "routing.md", "observation.md"}
+	for i, doc := range sent {
+		if doc.filename != wantNames[i] {
+			t.Errorf("document[%d] filename = %q, want %q", i, doc.filename, wantNames[i])
+		}
+	}
+	if len(f.sleeps) != 3 {
+		t.Fatalf("sleeps = %d, want 3", len(f.sleeps))
+	}
+	for i, d := range f.sleeps {
+		if d != time.Second {
+			t.Errorf("sleep[%d] = %v, want 1s", i, d)
+		}
+	}
+}
+
+func TestSingleDocumentIsNotAnAlbum(t *testing.T) {
+	f := newBotFixture(t)
+	req := f.enqueueGist("https://github.com/example/project")
+	docs := writeGistDocs(t, map[string]string{"codemap": "CODEMAP"})
+
+	res := testResult(docs)
+	res.Request = req
+	f.bot.Notify(context.Background(), res)
+
+	if got := len(f.sender.sentGroups()); got != 0 {
+		t.Errorf("media groups = %d, want 0", got)
+	}
+	sent := f.sender.sentDocuments()
+	if len(sent) != 1 {
+		t.Fatalf("documents = %d, want 1", len(sent))
+	}
+	if sent[0].filename != "codemap.md" || string(sent[0].data) != "CODEMAP" {
+		t.Errorf("document = %q %q, want codemap.md CODEMAP", sent[0].filename, sent[0].data)
+	}
+	if len(f.sleeps) != 0 {
+		t.Errorf("sleeps = %v, want none for a single document", f.sleeps)
+	}
+}
+
+func TestFailureLogAttachmentIsCapped(t *testing.T) {
+	const maxBytes = 5 << 20
+	f := newBotFixture(t)
+	logPath := filepath.Join(t.TempDir(), "job-1.log")
+	body := strings.Repeat("x", maxBytes) + "\nTAIL-END\n"
+	if err := os.WriteFile(logPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	res := testResult(repo.Docs{})
+	res.Status = state.StatusFailed
+	res.Err = errors.New("clone failed")
+	res.LogPath = logPath
+	f.bot.Notify(context.Background(), res)
+
+	sent := f.sender.sentDocuments()
+	if len(sent) != 1 {
+		t.Fatalf("documents = %d, want 1", len(sent))
+	}
+	if got := len(sent[0].data); got > maxBytes {
+		t.Errorf("log attachment = %d bytes, want at most %d", got, maxBytes)
+	}
+	if !strings.Contains(string(sent[0].data[:64]), "truncated") {
+		t.Errorf("log attachment does not carry a truncation marker: %q", sent[0].data[:64])
+	}
+	if !strings.HasSuffix(string(sent[0].data), "TAIL-END\n") {
+		t.Error("log attachment does not end with the newest log data")
+	}
+}
+
+func TestCardTextIsHTMLSafe(t *testing.T) {
 	f := newBotFixture(t)
 
 	logPath := filepath.Join(t.TempDir(), "job-1.log")
@@ -730,6 +1137,7 @@ func TestNotifyHTMLIsEscaped(t *testing.T) {
 	}
 
 	res := testResult(repo.Docs{})
+	res.Request.Target = repo.Target{URL: `<script>alert("repo")</script>`}
 	res.Status = state.StatusFailed
 	res.Err = errors.New(`<script>alert("x")</script>`)
 	res.LogPath = logPath
@@ -747,6 +1155,21 @@ func TestNotifyHTMLIsEscaped(t *testing.T) {
 	for _, want := range []string{"&lt;script&gt;", "&lt;b&gt;bold&lt;/b&gt;", "&amp;"} {
 		requireContains(t, text, want)
 	}
+	if got := utf16Count(text); got > maxMessageUTF16 {
+		t.Errorf("card = %d UTF-16 units, want at most %d", got, maxMessageUTF16)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestNotifyDocumentCapAtOneMiB(t *testing.T) {

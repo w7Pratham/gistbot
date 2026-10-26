@@ -3,6 +3,7 @@ package bot
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"regexp"
@@ -25,6 +26,8 @@ const (
 	maxLogLineBytes = 4096
 	// logReadBuffer is the streaming buffer size for tailFile.
 	logReadBuffer = 64 * 1024
+	// logTruncatedMarker prefixes a capped .log attachment.
+	logTruncatedMarker = "[log truncated: showing the most recent output]\n"
 )
 
 // docOrder is the canonical order used when presenting gist documents.
@@ -37,48 +40,141 @@ var (
 	logControl = regexp.MustCompile(`[\x00-\x08\x0b-\x1f\x7f]`)
 )
 
-// successHTML renders the summary for a successful job. Missing documents are
-// reported on their own line; the caller sends the documents afterwards.
-func successHTML(res jobs.Result) string {
-	lines := []string{
-		"Gist complete",
-		targetDisplay(res.Request.Target),
-		"model: " + modelDisplay(res.Request.ModelAlias, res.Request.Model),
-		"runner: " + string(res.Request.Runner),
-		"duration: " + formatDuration(durationOf(res)),
-		"docs: " + docsLabel(presentDocNames(res.Docs.Files)),
-	}
-	if missing := missingDocNames(res.Docs); len(missing) > 0 {
-		lines = append(lines, "Missing: "+strings.Join(missing, ", "))
-	}
-
-	return preBlock(telegram.EscapeAndTruncate(strings.Join(lines, "\n"), maxMessageUTF16-preOverhead))
+// queuedCardHTML renders the initial card for a job waiting behind others.
+func queuedCardHTML(req jobs.Request, position int) string {
+	return strings.Join([]string{
+		cardTitle(fmt.Sprintf("🕓 Queued #%d", position), targetDisplay(req.Target)),
+		cardLine(requestMeta(req)),
+	}, "\n")
 }
 
-// failureHTML renders a short status and, when available, the escaped tail of
-// the job log.
-func failureHTML(res jobs.Result, tail string) string {
-	label := "Job"
-	if res.Request.ID != "" {
-		label += " " + res.Request.ID
-	}
+// runningCardHTML renders the card for a job the worker has started.
+func runningCardHTML(req jobs.Request, started time.Time) string {
+	return strings.Join([]string{
+		cardTitle("⚡ Running", targetDisplay(req.Target)),
+		cardLine(requestMeta(req) + " · started " + started.Format("15:04")),
+	}, "\n")
+}
 
+// successCardHTML renders the terminal card for a successful job. Missing
+// documents are reported on their own line; the caller sends the docs after.
+func successCardHTML(res jobs.Result) string {
+	names := presentDocNames(res.Docs.Files)
 	lines := []string{
-		label + " " + statusWord(res.Status),
-		targetDisplay(res.Request.Target),
-		"model: " + modelDisplay(res.Request.ModelAlias, res.Request.Model),
-		"runner: " + string(res.Request.Runner),
-		"duration: " + formatDuration(durationOf(res)),
+		cardTitle("✅ Gist ready", targetDisplay(res.Request.Target)),
+		cardLine(requestMeta(res.Request) + " · " + cardDuration(durationOf(res)) + " · " + docCountLabel(len(names))),
 	}
-	if res.Err != nil {
-		lines = append(lines, "error: "+res.Err.Error())
+	if missing := missingDocNames(res.Docs); len(missing) > 0 {
+		lines = append(lines, cardField("Missing: "+strings.Join(missing, ", ")))
 	}
+	return strings.Join(lines, "\n")
+}
 
-	html := preBlock(telegram.EscapeAndTruncate(strings.Join(lines, "\n"), failureSummaryBudget))
-	if escaped := escapeTail(tail, logTailBudget); escaped != "" {
-		html += "\n" + preBlock(escaped)
+// failureCardHTML renders the terminal card for a failed, cancelled, or timed
+// out job and appends the escaped newest log lines inside a <pre> block.
+func failureCardHTML(res jobs.Result, tail string) string {
+	lines := []string{
+		cardTitle(failureTitle(res.Status), targetDisplay(res.Request.Target)),
+		cardField(failureReason(res)),
+		cardLine(requestMeta(res.Request) + " · " + cardDuration(durationOf(res))),
 	}
-	return html
+	return appendLogTail(strings.Join(lines, "\n"), tail)
+}
+
+// cardTitle renders the bold status and monospaced repository line.
+func cardTitle(status, target string) string {
+	return "<b>" + cardEscape(status) + "</b> · <code>" + cardEscape(target) + "</code>"
+}
+
+// cardLine renders one monospaced metadata line.
+func cardLine(text string) string {
+	return "<code>" + cardEscape(text) + "</code>"
+}
+
+// cardField renders one escaped plain-text line.
+func cardField(text string) string {
+	return cardEscape(text)
+}
+
+// cardEscape HTML-escapes and bounds one variable card field.
+func cardEscape(text string) string {
+	return telegram.EscapeAndTruncate(text, cardFieldBudget)
+}
+
+// appendLogTail appends as many escaped newest log lines as the 4,096 UTF-16
+// message budget leaves room for.
+func appendLogTail(header, tail string) string {
+	if tail == "" {
+		return header
+	}
+	remaining := maxMessageUTF16 - utf16Count(header) - preOverhead - len("\n\n")
+	if remaining <= 0 {
+		return header
+	}
+	if remaining > logTailBudget {
+		remaining = logTailBudget
+	}
+	escaped := escapeTail(tail, remaining)
+	if escaped == "" {
+		return header
+	}
+	return header + "\n\n" + preBlock(escaped)
+}
+
+// requestMeta renders the model and runner used by a job.
+func requestMeta(req jobs.Request) string {
+	runner := string(req.Runner)
+	if runner == "" {
+		runner = "unknown"
+	}
+	return modelDisplay(req.ModelAlias, req.Model) + " · " + runner
+}
+
+// docCountLabel renders the number of delivered gist documents.
+func docCountLabel(count int) string {
+	if count == 1 {
+		return "1 doc"
+	}
+	return fmt.Sprintf("%d docs", count)
+}
+
+// failureTitle renders the bold status label for a terminal failure.
+func failureTitle(status state.JobStatus) string {
+	switch status {
+	case state.StatusCancelled:
+		return "🚫 Cancelled"
+	case state.StatusTimedOut:
+		return "⌛ Timed out"
+	default:
+		return "❌ Gist failed"
+	}
+}
+
+// failureReason prefers the concrete error and falls back to the status word.
+func failureReason(res jobs.Result) string {
+	if res.Err != nil {
+		return res.Err.Error()
+	}
+	return statusWord(res.Status)
+}
+
+// cardDuration renders a duration in the card style: "1m 38s", "20m 00s".
+func cardDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	d = d.Round(time.Second)
+	hours := int(d / time.Hour)
+	minutes := int(d%time.Hour) / int(time.Minute)
+	seconds := int(d%time.Minute) / int(time.Second)
+	switch {
+	case hours > 0:
+		return fmt.Sprintf("%dh %02dm %02ds", hours, minutes, seconds)
+	case minutes > 0:
+		return fmt.Sprintf("%dm %02ds", minutes, seconds)
+	default:
+		return fmt.Sprintf("%ds", seconds)
+	}
 }
 
 // tailFile returns the last maxLines lines of path with ANSI escapes and
@@ -228,14 +324,6 @@ func missingDocNames(docs repo.Docs) []string {
 	return append(missing, extra...)
 }
 
-// docsLabel renders the present document list for the summary.
-func docsLabel(names []string) string {
-	if len(names) == 0 {
-		return "none"
-	}
-	return strings.Join(names, ", ")
-}
-
 // readDoc reads at most maxDocBytes of one document.
 func readDoc(path string) ([]byte, error) {
 	file, err := os.Open(path)
@@ -245,6 +333,42 @@ func readDoc(path string) ([]byte, error) {
 	defer file.Close()
 
 	return io.ReadAll(io.LimitReader(file, maxDocBytes))
+}
+
+// readLogAttachment reads the newest bytes of a job log. The returned data
+// never exceeds maxLogAttachmentBytes; when the log is larger, truncated is
+// true and the caller prefixes the marker whose length was reserved here.
+func readLogAttachment(path string) (data []byte, truncated bool, err error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+
+	limit := int64(maxLogAttachmentBytes)
+	truncated = info.Size() > limit
+	if truncated {
+		limit -= int64(len(logTruncatedMarker))
+		if limit < 0 {
+			limit = 0
+		}
+	}
+	if info.Size() > limit {
+		if _, err := file.Seek(info.Size()-limit, io.SeekStart); err != nil {
+			return nil, false, err
+		}
+	}
+
+	data, err = io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return nil, false, err
+	}
+	return data, truncated, nil
 }
 
 // displayRepo turns a canonical repository ID into owner/repo for display.

@@ -114,13 +114,26 @@ func (b *Bot) handleGist(ctx context.Context, chatID int64, args []string) {
 		return
 	}
 
-	label := target.Owner + "/" + target.Name
-	model := modelDisplay(selected.alias, selected.model)
 	if position <= 0 {
-		b.reply(ctx, chatID, fmt.Sprintf("Started %s · %s · %s", label, model, selected.runner))
+		b.sendJobCard(ctx, chatID, req, runningCardHTML(req, now))
 		return
 	}
-	b.reply(ctx, chatID, fmt.Sprintf("Queued #%d · %s · %s · %s", position, label, model, selected.runner))
+	b.sendJobCard(ctx, chatID, req, queuedCardHTML(req, position))
+}
+
+// sendJobCard sends a job's initial card and remembers its message ID. A failed
+// send is logged and does not affect the queued job; the final notification
+// then falls back to a new card.
+func (b *Bot) sendJobCard(ctx context.Context, chatID int64, req jobs.Request, html string) {
+	if b.sender == nil {
+		return
+	}
+	messageID, err := b.sender.SendMessageID(ctx, chatID, html)
+	if err != nil {
+		b.logWarn("send job card", "job", req.ID, "error", err)
+		return
+	}
+	b.storeCard(req.ID, messageID)
 }
 
 func (b *Bot) handleStatus(ctx context.Context, chatID int64) {
