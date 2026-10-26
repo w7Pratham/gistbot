@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -30,6 +31,8 @@ func ListModels(ctx context.Context, bin string) ([]string, error) {
 	// The argv is fixed. The binary path is configuration, not user input, and
 	// is never passed through a shell.
 	cmd := exec.CommandContext(ctx, bin, "models")
+	// The OpenCode child must never receive bot credentials it does not need.
+	cmd.Env = modelsEnv(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -48,4 +51,27 @@ func ListModels(ctx context.Context, bin string) ([]string, error) {
 		models = append(models, line)
 	}
 	return models, nil
+}
+
+// modelsEnv removes bot credentials from the environment passed to the
+// OpenCode CLI. The CLI still needs HOME, PATH, XDG_*, and other non-secret
+// variables for provider authentication and normal operation, so only known
+// credential-bearing keys are dropped.
+func modelsEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "TELEGRAM_") {
+			continue
+		}
+		switch key {
+		case "OWNER_USER_ID",
+			"OPENCODE_PASSWORD",
+			"OPENCODE_SERVER_PASSWORD",
+			"OPENCODE_API_PASSWORD":
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }

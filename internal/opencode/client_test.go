@@ -482,6 +482,92 @@ printf '  opencode/deepseek-flash-free  \n\nopencode/deepseek-flash\r\n\t\n'
 	}
 }
 
+func TestListModelsFiltersBotSecretsFromChildEnvironment(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "child-env.txt")
+	home := t.TempDir()
+	xdg := t.TempDir()
+
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("FAKE_MODELS_ENV", envFile)
+	t.Setenv("TELEGRAM_BOT_TOKEN", "forbidden-telegram-token")
+	t.Setenv("TELEGRAM_API_URL", "https://forbidden.invalid")
+	t.Setenv("OWNER_USER_ID", "424242")
+	t.Setenv("OPENCODE_PASSWORD", "forbidden-cli-password")
+	t.Setenv("OPENCODE_SERVER_PASSWORD", "forbidden-server-password")
+	t.Setenv("OPENCODE_API_PASSWORD", "forbidden-api-password")
+
+	bin := writeFakeModels(t, `#!/bin/sh
+set -eu
+env > "$FAKE_MODELS_ENV"
+printf 'opencode/deepseek-flash\n'
+`)
+
+	models, err := ListModels(testContext(t), bin)
+	if err != nil {
+		t.Fatalf("ListModels returned an error: %v", err)
+	}
+	if len(models) != 1 || models[0] != "opencode/deepseek-flash" {
+		t.Fatalf("models = %#v, want one model", models)
+	}
+
+	raw, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read child environment: %v", err)
+	}
+
+	env := make(map[string]string)
+	for _, line := range strings.Split(string(raw), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		env[key] = value
+	}
+
+	forbiddenKeys := []string{
+		"TELEGRAM_BOT_TOKEN",
+		"TELEGRAM_API_URL",
+		"OWNER_USER_ID",
+		"OPENCODE_PASSWORD",
+		"OPENCODE_SERVER_PASSWORD",
+		"OPENCODE_API_PASSWORD",
+	}
+	for _, key := range forbiddenKeys {
+		if _, ok := env[key]; ok {
+			t.Errorf("child environment contains forbidden key %s", key)
+		}
+	}
+	for key := range env {
+		if strings.HasPrefix(key, "TELEGRAM_") {
+			t.Errorf("child environment contains forbidden TELEGRAM_ key %s", key)
+		}
+	}
+	for _, secret := range []string{
+		"forbidden-telegram-token",
+		"forbidden-cli-password",
+		"forbidden-server-password",
+		"forbidden-api-password",
+	} {
+		if strings.Contains(string(raw), secret) {
+			t.Error("child environment contains a forbidden secret value")
+		}
+	}
+
+	if got := env["HOME"]; got != home {
+		t.Errorf("HOME = %q, want the preserved value", got)
+	}
+	if got := env["XDG_CONFIG_HOME"]; got != xdg {
+		t.Errorf("XDG_CONFIG_HOME = %q, want the preserved value", got)
+	}
+	if got := env["FAKE_MODELS_ENV"]; got != envFile {
+		t.Errorf("FAKE_MODELS_ENV = %q, want %q", got, envFile)
+	}
+	if env["PATH"] == "" {
+		t.Error("PATH was removed from the child environment")
+	}
+}
+
 func TestListModelsPropagatesFailure(t *testing.T) {
 	bin := writeFakeModels(t, `#!/bin/sh
 exit 2
