@@ -7,9 +7,15 @@ user, paths, state files, and service units.
 
 ## Status
 
-The repository is at the M0/proof and configuration stage. The Telegram client,
-job manager, runners, and bot loop are implemented in later milestones. The
-config package and build skeleton are in place.
+Zero Two is implemented: the owner-gated Telegram client and long-poll loop,
+the job manager and queue, the CLI and API runners, repository cloning,
+persisted model and runner selection, document browsing, and the systemd
+deployment are all in place. The automated suite runs with `make test` and
+`make test-race`.
+
+The remaining step is manual acceptance on a phone against the live bot. The
+checklist in `docs/install.md` has **not** been performed in this checkout;
+record the date and result next to each item when it is.
 
 ## Requirements
 
@@ -23,10 +29,22 @@ config package and build skeleton are in place.
 .
 ├── AGENTS.md              # security and contribution rules
 ├── Makefile               # fixed build/test commands
-├── docs/                  # design and M0 evidence
-├── internal/config/       # typed, validated environment configuration
+├── cmd/gistbot/           # entry point: wiring and graceful shutdown
+├── internal/
+│   ├── bot/               # command dispatch, rendering, document browsing
+│   ├── config/            # typed, validated environment configuration
+│   ├── jobs/              # job manager, queue, CLI and API runners
+│   ├── opencode/          # loopback OpenCode API client and model listing
+│   ├── repo/              # GitHub URL validation, cloning, gist documents
+│   ├── state/             # persisted model, runner, and job state
+│   └── telegram/          # Telegram client and long-poll loop
+├── deploy/                # systemd user units
+├── docs/                  # install/operations guide and M0 evidence
 └── scripts/               # M0 setup and proof scripts
 ```
+
+Tests live beside their packages as `*_test.go` files, with fixture scripts
+under `internal/*/testdata/`.
 
 ## Configuration
 
@@ -74,7 +92,7 @@ never print its value.
 ## Commands
 
 ```bash
-make build      # go build ./...
+make build      # build bin/gistbot from ./cmd/gistbot
 make test       # go test ./...
 make vet        # go vet ./...
 make test-race  # go test -race ./...

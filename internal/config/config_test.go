@@ -98,6 +98,46 @@ func TestLoadValid(t *testing.T) {
 	}
 }
 
+func TestLoadTrimsSecrets(t *testing.T) {
+	env := baseEnv()
+	env["TELEGRAM_BOT_TOKEN"] = "\n\t 123:secret \t\r\n"
+	env["OPENCODE_API_PASSWORD"] = "  api-secret\n"
+
+	cfg, err := Load(getenv(env))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TelegramToken != "123:secret" {
+		t.Errorf("TelegramToken = %q, want trimmed value", cfg.TelegramToken)
+	}
+	if cfg.OpenCodeAPIPassword != "api-secret" {
+		t.Errorf("OpenCodeAPIPassword is not trimmed")
+	}
+}
+
+func TestLoadSecretErrorsDoNotLeakValues(t *testing.T) {
+	env := baseEnv()
+	env["TELEGRAM_BOT_TOKEN"] = "\n 123:secret \t"
+	env["OPENCODE_API_PASSWORD"] = "  api-secret\n"
+	// Force a failure in an unrelated variable so the error path is exercised
+	// with padded secrets still present in the environment.
+	env["OWNER_USER_ID"] = "not-a-number"
+
+	_, err := Load(getenv(env))
+	if err == nil {
+		t.Fatal("Load succeeded, want error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "OWNER_USER_ID") {
+		t.Errorf("error %q does not name OWNER_USER_ID", msg)
+	}
+	for _, secret := range []string{"123:secret", "api-secret"} {
+		if strings.Contains(msg, secret) {
+			t.Errorf("error leaks secret %q: %q", secret, msg)
+		}
+	}
+}
+
 func TestLoadUsesOnlySuppliedGetter(t *testing.T) {
 	t.Setenv("TELEGRAM_BOT_TOKEN", "from-process-environment")
 	t.Setenv("OWNER_USER_ID", "999")

@@ -112,8 +112,8 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("getenv func is nil")
 	}
 
-	token := getenv("TELEGRAM_BOT_TOKEN")
-	if strings.TrimSpace(token) == "" {
+	token := strings.TrimSpace(getenv("TELEGRAM_BOT_TOKEN"))
+	if token == "" {
 		return Config{}, errors.New("TELEGRAM_BOT_TOKEN is required")
 	}
 
@@ -149,8 +149,8 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("OPENCODE_API_URL must be an http(s) URL")
 	}
 
-	apiPassword := getenv("OPENCODE_API_PASSWORD")
-	if strings.TrimSpace(apiPassword) == "" {
+	apiPassword := strings.TrimSpace(getenv("OPENCODE_API_PASSWORD"))
+	if apiPassword == "" {
 		return Config{}, errors.New("OPENCODE_API_PASSWORD is required")
 	}
 

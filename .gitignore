@@ -2,6 +2,7 @@
 bin/
 .m0/
 .superpowers/
+docs/m0-gistbot.md
 *.log
 coverage.out
 *.test
