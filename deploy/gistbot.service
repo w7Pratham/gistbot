@@ -1,0 +1,24 @@
+[Unit]
+Description=GistBot Telegram bot
+After=network-online.target opencode-gist.service
+Wants=opencode-gist.service
+
+[Service]
+Type=simple
+ExecStart=/home/gistbot/bin/gistbot
+WorkingDirectory=/home/gistbot
+EnvironmentFile=/home/gistbot/.config/gistbot/gistbot.env
+Environment=HOME=/home/gistbot
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/gistbot/gists /home/gistbot/.local/state /home/gistbot/.local/share/opencode /home/gistbot/.cache/opencode
+
+[Install]
+WantedBy=default.target

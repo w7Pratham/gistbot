@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenCode API server for GistBot
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/gistbot/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4096
+WorkingDirectory=/home/gistbot/gists
+EnvironmentFile=/home/gistbot/.config/gistbot/opencode-api.env
+Environment=HOME=/home/gistbot
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/gistbot/gists /home/gistbot/.local/share/opencode /home/gistbot/.cache/opencode /home/gistbot/.local/state
+
+[Install]
+WantedBy=default.target

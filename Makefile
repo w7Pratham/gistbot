@@ -3,7 +3,8 @@ GO ?= go
 .PHONY: build test vet test-race
 
 build:
-	$(GO) build ./...
+	@mkdir -p bin
+	$(GO) build -o bin/gistbot ./cmd/gistbot
 
 test:
 	$(GO) test ./...
