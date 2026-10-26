@@ -125,6 +125,12 @@ func (b *Bot) Handle(ctx context.Context, u telegram.Update) {
 		b.handleStatus(ctx, chatID)
 	case "cancel":
 		b.handleCancel(ctx, chatID)
+	case "list":
+		b.handleList(ctx, chatID)
+	case "show":
+		b.handleShow(ctx, chatID, args)
+	case "log":
+		b.handleLog(ctx, chatID, args)
 	default:
 		b.reply(ctx, chatID, "Unknown command. Use /help.")
 	}
