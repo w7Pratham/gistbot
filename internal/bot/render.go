@@ -53,7 +53,7 @@ func statusText(status jobs.Status) string {
 	if len(status.Queued) > 0 {
 		lines = append(lines, "", "<b>Queued</b>")
 		for i, job := range status.Queued {
-			lines = append(lines, cardLine(fmt.Sprintf("#%d %s", i+1, jobLine(job, false))))
+			lines = append(lines, cardLine(fmt.Sprintf("#%d %s", i+1, jobLine(job))))
 		}
 	}
 

@@ -415,6 +415,8 @@ func TestLogSendsTailAndLogFile(t *testing.T) {
 	f.jobs.status = jobs.Status{Running: &jobs.JobView{
 		ID:     "job-current",
 		RepoID: "github__example__project",
+		Model:  "flash",
+		Runner: "cli",
 	}}
 
 	var log strings.Builder
@@ -433,6 +435,8 @@ func TestLogSendsTailAndLogFile(t *testing.T) {
 	requireContains(t, text, "<b>Log</b>")
 	requireContains(t, text, "example/project")
 	requireContains(t, text, "job-current")
+	requireContains(t, text, "flash")
+	requireContains(t, text, "cli")
 	requireContains(t, text, "<pre>")
 	for _, want := range []string{"line-11", "line-20"} {
 		requireContains(t, text, want)
@@ -451,6 +455,30 @@ func TestLogSendsTailAndLogFile(t *testing.T) {
 	}
 	if string(sent[0].data) != log.String() {
 		t.Error("log attachment does not match the full job log")
+	}
+}
+
+func TestLogEmptySkipsAttachment(t *testing.T) {
+	f := newBotFixture(t)
+	f.jobs.status = jobs.Status{Running: &jobs.JobView{
+		ID:     "job-empty",
+		RepoID: "github__example__project",
+		Model:  "flash",
+		Runner: "cli",
+	}}
+	writeJobLog(t, f, "job-empty", "")
+
+	f.handle(privateUpdate("/log"))
+
+	texts := f.sender.messageTexts()
+	if len(texts) != 1 {
+		t.Fatalf("messages = %d, want 1", len(texts))
+	}
+	requireContains(t, texts[0], "log is empty")
+	requireContains(t, texts[0], "flash")
+	requireContains(t, texts[0], "cli")
+	if got := len(f.sender.sentDocuments()); got != 0 {
+		t.Errorf("documents = %d, want 0 for an empty log", got)
 	}
 }
 

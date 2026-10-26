@@ -139,7 +139,7 @@ func (b *Bot) handleLog(ctx context.Context, chatID int64, args []string) {
 	record, found := state.JobRecord{}, false
 	if len(args) == 0 {
 		if view := b.runningJob(); view != nil {
-			record, found = state.JobRecord{ID: view.ID, RepoID: view.RepoID}, true
+			record, found = recordFromView(*view), true
 		} else {
 			record, found = b.newestJob("")
 		}
@@ -150,7 +150,7 @@ func (b *Bot) handleLog(ctx context.Context, chatID int64, args []string) {
 			return
 		}
 		if view := b.runningJob(); view != nil && view.RepoID == repoID {
-			record, found = state.JobRecord{ID: view.ID, RepoID: view.RepoID}, true
+			record, found = recordFromView(*view), true
 		} else {
 			record, found = b.newestJob(repoID)
 		}
@@ -183,10 +183,24 @@ func (b *Bot) handleLog(ctx context.Context, chatID int64, args []string) {
 	}
 
 	b.send(ctx, chatID, logCardHTML(record, tail))
+	if strings.TrimSpace(tail) == "" {
+		return
+	}
 	b.sendLogFile(ctx, chatID, jobs.Result{
 		Request: jobs.Request{ID: record.ID, ChatID: chatID},
 		LogPath: path,
 	})
+}
+
+// recordFromView keeps the log card's model and runner for a running job that
+// has not reached persisted history yet.
+func recordFromView(view jobs.JobView) state.JobRecord {
+	return state.JobRecord{
+		ID:     view.ID,
+		RepoID: view.RepoID,
+		Model:  view.Model,
+		Runner: view.Runner,
+	}
 }
 
 // installedRepo resolves a displayed owner/repo or canonical ID against the

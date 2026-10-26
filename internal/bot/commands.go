@@ -476,16 +476,13 @@ func (b *Bot) jobStateText() string {
 }
 
 // jobLine renders the fields shared by queued job views.
-func jobLine(view jobs.JobView, withElapsed bool) string {
+func jobLine(view jobs.JobView) string {
 	parts := []string{displayRepo(view.RepoID)}
 	if view.Model != "" {
 		parts = append(parts, view.Model)
 	}
 	if view.Runner != "" {
 		parts = append(parts, view.Runner)
-	}
-	if withElapsed {
-		parts = append(parts, formatDuration(view.Elapsed))
 	}
 	return strings.Join(parts, " · ")
 }

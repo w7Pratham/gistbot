@@ -237,9 +237,9 @@ func TestRunOwnerGistEndToEnd(t *testing.T) {
 }
 
 // TestRunEndToEndEditsOneCardAndSendsAlbum pins the final Telegram UI for a
-// successful job: exactly one initial card, one Running edit of that same
-// card, one final edit, and exactly one album of three documents. It also
-// pins setMyCommands between deleteWebhook and long polling.
+// successful job: exactly one initial card, an optional Running edit racing the
+// initial send, one final edit, and exactly one album of three documents. It
+// also pins setMyCommands between deleteWebhook and long polling.
 func TestRunEndToEndEditsOneCardAndSendsAlbum(t *testing.T) {
 	fake := newFakeTelegram(t, ownerUpdate(1, "/gist https://github.com/owner/repo"))
 	env := newTestEnv(t, fake.server.URL)
@@ -266,9 +266,12 @@ func TestRunEndToEndEditsOneCardAndSendsAlbum(t *testing.T) {
 		}
 	}
 
+	// A position-0 job's initial card already says Running, so NotifyStarted's
+	// Running edit races the initial send. Only the terminal edit is
+	// guaranteed; accept one or two edits and require the last to be terminal.
 	edits := fake.editsCopy()
-	if len(edits) != 2 {
-		t.Fatalf("edits = %d, want exactly 2 (Running, final): %+v", len(edits), edits)
+	if len(edits) < 1 || len(edits) > 2 {
+		t.Fatalf("edits = %d, want 1-2 (optional Running, final): %+v", len(edits), edits)
 	}
 	for i, edit := range edits {
 		if edit.messageID != initial.id {
@@ -278,12 +281,13 @@ func TestRunEndToEndEditsOneCardAndSendsAlbum(t *testing.T) {
 			t.Errorf("edit[%d] chat = %q, want %d", i, edit.chatID, testOwnerID)
 		}
 	}
-	if !strings.Contains(edits[0].text, "⚡ Running") {
+	if len(edits) == 2 && !strings.Contains(edits[0].text, "⚡ Running") {
 		t.Errorf("first edit %q is not the Running card", edits[0].text)
 	}
+	final := edits[len(edits)-1]
 	for _, want := range []string{"✅ Gist ready", "owner/repo", "3 docs"} {
-		if !strings.Contains(edits[1].text, want) {
-			t.Errorf("final card %q does not contain %q", edits[1].text, want)
+		if !strings.Contains(final.text, want) {
+			t.Errorf("final card %q does not contain %q", final.text, want)
 		}
 	}
 
@@ -291,8 +295,8 @@ func TestRunEndToEndEditsOneCardAndSendsAlbum(t *testing.T) {
 		t.Errorf("Gist ready messages = %d, want exactly 1", got)
 	}
 
-	// The card is sent first, edited while running, and the album follows the
-	// final edit. Any interleaved getUpdates polls are irrelevant.
+	// The card is sent first, then edited, and the album follows the final
+	// edit. Any interleaved getUpdates polls are irrelevant.
 	sendAt := fake.eventIndex("sendMessage")
 	editAt := fake.eventIndex("editMessageText")
 	albumAt := fake.eventIndex("sendMediaGroup")
@@ -376,14 +380,16 @@ func TestRunEndToEndFailureSendsLogFile(t *testing.T) {
 		t.Errorf("initial card %q is not the Running card", initial.text)
 	}
 
+	// As in the success case, a position-0 job's Running edit races the initial
+	// send. Accept one or two edits and require the last to be the failure.
 	edits := fake.editsCopy()
-	if len(edits) != 2 {
-		t.Fatalf("edits = %d, want exactly 2 (Running, failed): %+v", len(edits), edits)
+	if len(edits) < 1 || len(edits) > 2 {
+		t.Fatalf("edits = %d, want 1-2 (optional Running, failed): %+v", len(edits), edits)
 	}
-	if !strings.Contains(edits[0].text, "⚡ Running") {
+	if len(edits) == 2 && !strings.Contains(edits[0].text, "⚡ Running") {
 		t.Errorf("first edit %q is not the Running card", edits[0].text)
 	}
-	failure := edits[1]
+	failure := edits[len(edits)-1]
 	if failure.messageID != initial.id {
 		t.Errorf("failure edit targets message %q, want the initial card %q", failure.messageID, initial.id)
 	}

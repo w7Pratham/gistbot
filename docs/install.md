@@ -224,8 +224,9 @@ tokens, passwords, or environment-file contents into the checklist.
       followed by exactly one `<job>.log` document. No album is sent.
 - [ ] Send `/cancel` during a long job: the same card is edited to
       `🚫 Cancelled`, includes a short log tail, and attaches the `.log` file.
-      Then run `pgrep -u gistbot -a 'opencode|git'` and confirm it prints
-      nothing.
+      With runner `cli`, run `pgrep -u gistbot -a -f 'opencode run'` and
+      `pgrep -u gistbot -a git`; both should print nothing. The always-on
+      `opencode-gist.service` API server is expected to keep running.
 - [ ] Send `/status` while a job runs: it shows only the running job and the
       queue, with the repository, model, runner, and elapsed time.
 
@@ -251,7 +252,7 @@ tokens, passwords, or environment-file contents into the checklist.
 - [ ] `/show ../../etc/passwd` is rejected and no file outside `WORK_DIR` is
       read.
 - [ ] `/log` returns a compact tail card under 4,096 characters and attaches
-      the full `.log` file.
+      the `.log` file, capped at the most recent 5 MiB.
 - [ ] `/list` shows installed repositories newest first and stays within one
       Telegram message.
 
