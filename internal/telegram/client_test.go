@@ -814,9 +814,10 @@ func TestEditMessageTextRejectsTooLong(t *testing.T) {
 
 func TestSendMediaGroupBuildsDocumentsAndFiles(t *testing.T) {
 	type mediaEntry struct {
-		Type    string `json:"type"`
-		Media   string `json:"media"`
-		Caption string `json:"caption"`
+		Type      string `json:"type"`
+		Media     string `json:"media"`
+		Caption   string `json:"caption"`
+		ParseMode string `json:"parse_mode"`
 	}
 
 	docs := []Document{
@@ -892,8 +893,8 @@ func TestSendMediaGroupBuildsDocumentsAndFiles(t *testing.T) {
 	}
 
 	wantMedia := []mediaEntry{
-		{Type: "document", Media: "attach://file0", Caption: "<b>Code map</b>"},
-		{Type: "document", Media: "attach://file1"},
+		{Type: "document", Media: "attach://file0", Caption: "<b>Code map</b>", ParseMode: "HTML"},
+		{Type: "document", Media: "attach://file1", ParseMode: "HTML"},
 	}
 	if len(gotMedia) != len(wantMedia) {
 		t.Fatalf("media entries = %d, want %d", len(gotMedia), len(wantMedia))

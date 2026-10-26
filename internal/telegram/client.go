@@ -250,8 +250,9 @@ func (c *Client) SendDocument(ctx context.Context, chatID int64, filename string
 }
 
 // SendMediaGroup uploads two to ten documents as one album. Captions are not
-// escaped here: callers must pass output from EscapeAndTruncate. The same
-// HTML parse mode applies to every caption in the group.
+// escaped here: callers must pass output from EscapeAndTruncate. Telegram reads
+// parse_mode per media item, so every item carries HTML whether or not it has a
+// caption.
 func (c *Client) SendMediaGroup(ctx context.Context, chatID int64, docs []Document) error {
 	if len(docs) < minMediaGroupDocs || len(docs) > maxMediaGroupDocs {
 		return c.wrap(methodSendMediaGroup, fmt.Errorf("requires 2 to 10 documents, got %d", len(docs)))
@@ -260,9 +261,10 @@ func (c *Client) SendMediaGroup(ctx context.Context, chatID int64, docs []Docume
 	items := make([]mediaGroupItem, len(docs))
 	for i, doc := range docs {
 		items[i] = mediaGroupItem{
-			Type:    "document",
-			Media:   "attach://file" + strconv.Itoa(i),
-			Caption: doc.Caption,
+			Type:      "document",
+			Media:     "attach://file" + strconv.Itoa(i),
+			Caption:   doc.Caption,
+			ParseMode: parseModeHTML,
 		}
 	}
 	media, err := json.Marshal(items)
@@ -369,11 +371,13 @@ type apiParameters struct {
 	RetryAfter int `json:"retry_after"`
 }
 
-// mediaGroupItem is one entry in the sendMediaGroup media JSON array.
+// mediaGroupItem is one entry in the sendMediaGroup media JSON array. Telegram
+// reads parse_mode from each item, not from a top-level field.
 type mediaGroupItem struct {
-	Type    string `json:"type"`
-	Media   string `json:"media"`
-	Caption string `json:"caption,omitempty"`
+	Type      string `json:"type"`
+	Media     string `json:"media"`
+	Caption   string `json:"caption,omitempty"`
+	ParseMode string `json:"parse_mode,omitempty"`
 }
 
 // formBody rebuilds an encoded form for every attempt so 429 retries can
