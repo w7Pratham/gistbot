@@ -19,9 +19,11 @@ const (
 	// maxFocusRunes bounds the free-form focus appended to a gist job.
 	maxFocusRunes = 200
 
-	runnerCLI = "cli"
-	runnerAPI = "api"
-	aliasFree = "free"
+	runnerCLI  = "cli"
+	runnerAPI  = "api"
+	aliasFree  = "free"
+	aliasFlash = "flash"
+	aliasPro   = "pro"
 )
 
 // selection is the persisted model and runner resolved for one new job.
@@ -126,7 +128,8 @@ func (b *Bot) handleStatus(ctx context.Context, chatID int64) {
 		b.reply(ctx, chatID, "Jobs are not available.")
 		return
 	}
-	b.replyPre(ctx, chatID, statusText(b.jobs.Status()))
+	text := b.settingsText() + "\n\n" + statusText(b.jobs.Status())
+	b.replyPre(ctx, chatID, text)
 }
 
 func (b *Bot) handleCancel(ctx context.Context, chatID int64) {
@@ -139,6 +142,227 @@ func (b *Bot) handleCancel(ctx context.Context, chatID int64) {
 		return
 	}
 	b.reply(ctx, chatID, "No running job.")
+}
+
+// handleModel shows the current selection or persists a new model alias. The
+// free alias additionally accepts an installed provider/model[#variant]
+// override or "reset" to fall back to the configured free model.
+func (b *Bot) handleModel(ctx context.Context, chatID int64, args []string) {
+	if len(args) == 0 {
+		b.reply(ctx, chatID, strings.Join(b.modelLines(), "\n"))
+		return
+	}
+	if b.state == nil {
+		b.reply(ctx, chatID, "State is not available.")
+		return
+	}
+
+	alias := strings.ToLower(strings.TrimSpace(args[0]))
+	switch alias {
+	case aliasFree:
+		switch {
+		case len(args) == 1:
+			b.persistAlias(ctx, chatID, aliasFree)
+		case len(args) > 2:
+			b.reply(ctx, chatID, "Usage: /model free [provider/model[#variant]|reset]")
+		case strings.EqualFold(strings.TrimSpace(args[1]), "reset"):
+			if err := b.state.SetModel(aliasFree); err != nil {
+				b.logWarn("persist model selection", "error", err)
+				b.reply(ctx, chatID, "Could not save the model selection.")
+				return
+			}
+			if err := b.state.ClearFreeModel(); err != nil {
+				b.logWarn("clear free model override", "error", err)
+				b.reply(ctx, chatID, "Could not save the model selection.")
+				return
+			}
+			b.reply(ctx, chatID, strings.Join(b.modelLines(), "\n"))
+		default:
+			value := strings.TrimSpace(args[1])
+			if !b.validateFreeModel(ctx, chatID, value) {
+				return
+			}
+			if err := b.state.SetModel(aliasFree); err != nil {
+				b.logWarn("persist model selection", "error", err)
+				b.reply(ctx, chatID, "Could not save the model selection.")
+				return
+			}
+			if err := b.state.SetFreeModel(value); err != nil {
+				b.logWarn("persist free model override", "error", err)
+				b.reply(ctx, chatID, "Could not save the model selection.")
+				return
+			}
+			b.reply(ctx, chatID, strings.Join(b.modelLines(), "\n"))
+		}
+	case aliasFlash, aliasPro:
+		if len(args) > 1 {
+			b.reply(ctx, chatID, "Usage: /model "+alias)
+			return
+		}
+		b.persistAlias(ctx, chatID, alias)
+	default:
+		b.reply(ctx, chatID, "Unknown model. Use free, flash, or pro.")
+	}
+}
+
+// persistAlias stores the selected alias. An existing free override is kept;
+// only "/model free reset" clears it.
+func (b *Bot) persistAlias(ctx context.Context, chatID int64, alias string) {
+	if err := b.state.SetModel(alias); err != nil {
+		b.logWarn("persist model selection", "error", err)
+		b.reply(ctx, chatID, "Could not save the model selection.")
+		return
+	}
+	b.reply(ctx, chatID, strings.Join(b.modelLines(), "\n"))
+}
+
+// validateFreeModel checks that raw is provider/model[#variant] and that the
+// base provider/model exactly matches one of the models installed in OpenCode.
+func (b *Bot) validateFreeModel(ctx context.Context, chatID int64, raw string) bool {
+	ref, err := config.ParseModelRef(raw)
+	if err != nil {
+		b.reply(ctx, chatID, "Model reference is invalid. Use provider/model with an optional #variant.")
+		return false
+	}
+	if b.listModels == nil {
+		b.reply(ctx, chatID, "Could not list installed models.")
+		return false
+	}
+	installed, err := b.listModels(ctx)
+	if err != nil {
+		b.logWarn("list installed models", "error", err)
+		b.reply(ctx, chatID, "Could not list installed models.")
+		return false
+	}
+
+	base := ref.ProviderID + "/" + ref.ModelID
+	for _, id := range installed {
+		if id == base {
+			return true
+		}
+	}
+	b.reply(ctx, chatID, "Unknown model. Use an installed provider/model.")
+	return false
+}
+
+// modelLines renders the alias, resolved reference, free default, and current
+// override for /model.
+func (b *Bot) modelLines() []string {
+	data := state.Data{}
+	if b.state != nil {
+		data = b.state.Snapshot()
+	}
+	alias := data.Model
+	if alias == "" {
+		alias = b.cfg.DefaultModel
+	}
+	override := strings.TrimSpace(data.FreeModel)
+
+	model := alias
+	if ref, err := b.cfg.ResolveModel(alias, override); err == nil {
+		model = aliasWithRef(alias, ref)
+	}
+
+	freeDefault := "not configured"
+	if ref, ok := b.cfg.Models[aliasFree]; ok && (ref.ProviderID != "" || ref.ModelID != "") {
+		freeDefault = ref.String()
+	}
+
+	shownOverride := "none"
+	if override != "" {
+		shownOverride = override
+	}
+
+	return []string{
+		"Model: " + model,
+		"Free default: " + freeDefault,
+		"Free override: " + shownOverride,
+		"Aliases: free, flash, pro",
+	}
+}
+
+// handleRunner shows the selected runner or persists cli/api.
+func (b *Bot) handleRunner(ctx context.Context, chatID int64, args []string) {
+	if len(args) == 0 {
+		b.reply(ctx, chatID, "Runner: "+b.activeRunner())
+		return
+	}
+	if len(args) > 1 {
+		b.reply(ctx, chatID, "Usage: /runner [cli|api]")
+		return
+	}
+
+	runner := strings.ToLower(strings.TrimSpace(args[0]))
+	switch runner {
+	case runnerCLI, runnerAPI:
+		if b.state == nil {
+			b.reply(ctx, chatID, "State is not available.")
+			return
+		}
+		if err := b.state.SetRunner(runner); err != nil {
+			b.logWarn("persist runner selection", "error", err)
+			b.reply(ctx, chatID, "Could not save the runner selection.")
+			return
+		}
+		b.reply(ctx, chatID, "Runner: "+runner)
+	default:
+		b.reply(ctx, chatID, "Unknown runner. Use cli or api.")
+	}
+}
+
+// settingsText renders the active runner, model, and free override for /status.
+func (b *Bot) settingsText() string {
+	data := state.Data{}
+	if b.state != nil {
+		data = b.state.Snapshot()
+	}
+	alias := data.Model
+	if alias == "" {
+		alias = b.cfg.DefaultModel
+	}
+	override := strings.TrimSpace(data.FreeModel)
+
+	model := alias
+	if ref, err := b.cfg.ResolveModel(alias, override); err == nil {
+		model = aliasWithRef(alias, ref)
+	}
+
+	shownOverride := "none"
+	if override != "" {
+		shownOverride = override
+	}
+
+	return strings.Join([]string{
+		"Runner: " + b.activeRunner(),
+		"Model: " + model,
+		"Free override: " + shownOverride,
+	}, "\n")
+}
+
+// activeRunner returns the persisted runner or the configured default.
+func (b *Bot) activeRunner() string {
+	runner := ""
+	if b.state != nil {
+		runner = b.state.Snapshot().Runner
+	}
+	if runner == "" {
+		runner = b.cfg.DefaultRunner
+	}
+	if runner == "" {
+		return "unknown"
+	}
+	return runner
+}
+
+// aliasWithRef renders an alias with its resolved reference.
+func aliasWithRef(alias string, ref config.ModelRef) string {
+	if ref.ProviderID == "" && ref.ModelID == "" {
+		return alias
+	}
+	if alias == "" {
+		return ref.String()
+	}
+	return alias + " (" + ref.String() + ")"
 }
 
 // currentSelection resolves the model alias and runner persisted in state,

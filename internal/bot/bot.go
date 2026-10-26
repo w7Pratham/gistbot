@@ -131,6 +131,10 @@ func (b *Bot) Handle(ctx context.Context, u telegram.Update) {
 		b.handleShow(ctx, chatID, args)
 	case "log":
 		b.handleLog(ctx, chatID, args)
+	case "model":
+		b.handleModel(ctx, chatID, args)
+	case "runner":
+		b.handleRunner(ctx, chatID, args)
 	default:
 		b.reply(ctx, chatID, "Unknown command. Use /help.")
 	}
