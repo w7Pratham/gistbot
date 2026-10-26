@@ -69,6 +69,51 @@ func addJobRecord(t *testing.T, f *botFixture, id, repoID string, started time.T
 	}
 }
 
+func TestListStaysWithinMessageLimitAtScale(t *testing.T) {
+	f := newBotFixture(t)
+
+	const installed = 60
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.Local)
+	for i := 0; i < installed; i++ {
+		name := fmt.Sprintf("repository-with-a-long-name-%02d", i)
+		installRepo(t, f, "long-organization-name", name, map[string]string{
+			"codemap":     "CODEMAP",
+			"routing":     "ROUTING",
+			"observation": "OBSERVATION",
+		}, base.Add(time.Duration(i)*time.Minute))
+	}
+
+	f.handle(privateUpdate("/list"))
+
+	texts := f.sender.messageTexts()
+	if len(texts) != 1 {
+		t.Fatalf("messages = %d, want 1", len(texts))
+	}
+	text := texts[0]
+
+	if got := utf16Count(text); got > maxMessageUTF16 {
+		t.Errorf("list is %d UTF-16 units, want <= %d", got, maxMessageUTF16)
+	}
+	requireNotContains(t, text, "<pre>")
+	requireContains(t, text, "<b>Installed</b>")
+	requireContains(t, text, "<code>60 repos</code>")
+
+	// The newest repositories survive the cut.
+	for i := installed - 10; i < installed; i++ {
+		requireContains(t, text, fmt.Sprintf("long-organization-name/repository-with-a-long-name-%02d ·", i))
+	}
+
+	shown := strings.Count(text, "<code>long-organization-name/repository-with-a-long-name-")
+	if shown == 0 || shown >= installed {
+		t.Fatalf("shown repositories = %d, want a bounded subset of %d", shown, installed)
+	}
+	omitted := installed - shown
+	requireContains(t, text, fmt.Sprintf("… and %d more", omitted))
+	if strings.Contains(text, "long-organization-name/repository-with-a-long-name-00 ·") {
+		t.Errorf("oldest repository was not omitted:\n%s", text)
+	}
+}
+
 func TestListIsCompact(t *testing.T) {
 	f := newBotFixture(t)
 

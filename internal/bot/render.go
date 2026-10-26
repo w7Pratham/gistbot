@@ -75,17 +75,51 @@ func runningStatusLine(view jobs.JobView) string {
 }
 
 // listText renders the installed repositories as a bold header and one
-// monospaced line each, newest first.
+// monospaced line each, newest first. The whole message is budgeted against
+// Telegram's limit: after showing as many newest entries as fit, an
+// "… and N more" line reports the omitted count.
 func listText(entries []repo.Entry) string {
-	lines := make([]string, 0, len(entries)+1)
-	lines = append(lines, "<b>Installed</b> · <code>"+repoCountLabel(len(entries))+"</code>")
-	for _, entry := range entries {
-		lines = append(lines, cardLine(fmt.Sprintf("%s · %s · %s",
-			entry.Display,
-			entry.ModTime.Format(listTimeLayout),
-			strings.Join(entry.Docs, ","))))
+	header := "<b>Installed</b> · <code>" + repoCountLabel(len(entries)) + "</code>"
+	lines := make([]string, 0, len(entries)+2)
+	lines = append(lines, header)
+	used := utf16Count(header)
+
+	for i, entry := range entries {
+		line := listEntryLine(entry)
+		lineUnits := utf16Count(line)
+		remaining := len(entries) - i - 1
+
+		needed := used + 1 + lineUnits
+		if remaining > 0 {
+			// Reserve room for the omitted-count line if this is the last
+			// repository that fits.
+			needed += 1 + utf16Count(listMoreLine(remaining))
+		}
+		if needed > maxMessageUTF16 {
+			break
+		}
+
+		lines = append(lines, line)
+		used += 1 + lineUnits
+	}
+
+	if omitted := len(entries) - (len(lines) - 1); omitted > 0 {
+		lines = append(lines, listMoreLine(omitted))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// listEntryLine renders one installed repository.
+func listEntryLine(entry repo.Entry) string {
+	return cardLine(fmt.Sprintf("%s · %s · %s",
+		entry.Display,
+		entry.ModTime.Format(listTimeLayout),
+		strings.Join(entry.Docs, ",")))
+}
+
+// listMoreLine renders the clear omitted-count suffix for a bounded /list.
+func listMoreLine(omitted int) string {
+	return cardLine(fmt.Sprintf("… and %d more", omitted))
 }
 
 // repoCountLabel renders "1 repo" or "N repos".
