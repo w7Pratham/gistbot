@@ -48,9 +48,11 @@ under `internal/*/testdata/`.
 
 ## Configuration
 
-Configuration comes from environment variables supplied by systemd
-`EnvironmentFile`. Copy `.env.example` to `.env` for local use and fill in the
-secrets. Never commit `.env`.
+Configuration comes from process environment variables. In production, systemd
+supplies `/home/gistbot/.config/gistbot/gistbot.env` via `EnvironmentFile`. The
+binary does **not** auto-load `.env`; for a foreground run, source the
+`gistbot.env` file first. Use `.env.example` as the template. Never commit env
+files.
 
 Required:
 
