@@ -222,17 +222,23 @@ func (f *apiFakeClient) snapshot() apiSnapshot {
 	}
 }
 
-// apiRestartRecorder counts restart calls and can fail them on demand.
+// apiRestartRecorder counts restart calls, records the context it received,
+// and can fail restarts on demand.
 type apiRestartRecorder struct {
-	mu    sync.Mutex
-	calls int
-	err   error
+	mu          sync.Mutex
+	calls       int
+	err         error
+	ctxErr      error
+	deadline    time.Time
+	hasDeadline bool
 }
 
-func (r *apiRestartRecorder) fn(context.Context) error {
+func (r *apiRestartRecorder) fn(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
+	r.ctxErr = ctx.Err()
+	r.deadline, r.hasDeadline = ctx.Deadline()
 	return r.err
 }
 
@@ -240,6 +246,24 @@ func (r *apiRestartRecorder) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls
+}
+
+type apiRestartSnapshot struct {
+	calls       int
+	ctxErr      error
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (r *apiRestartRecorder) snapshot() apiRestartSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return apiRestartSnapshot{
+		calls:       r.calls,
+		ctxErr:      r.ctxErr,
+		deadline:    r.deadline,
+		hasDeadline: r.hasDeadline,
+	}
 }
 
 type apiTestFixture struct {
@@ -454,14 +478,71 @@ func TestAPIRunnerWaitFailureReturnsError(t *testing.T) {
 	if errors.Is(err, ErrCancelled) || errors.Is(err, ErrTimeout) {
 		t.Errorf("wait failure was reported as cancellation or timeout")
 	}
-	if got := f.client.countCall("interrupt"); got != 0 {
-		t.Errorf("Interrupt calls = %d, want 0 for a non-context wait failure", got)
+	if got := f.client.countCall("interrupt"); got != 1 {
+		t.Errorf("Interrupt calls = %d, want 1 cleanup interrupt", got)
+	}
+	if got := f.restarts.count(); got != 0 {
+		t.Errorf("restart calls = %d, want 0 for a cleanup interrupt", got)
+	}
+	if snap := f.client.snapshot(); snap.interruptCtxErr != nil {
+		t.Errorf("cleanup interrupt context error = %v, want a live background context", snap.interruptCtxErr)
 	}
 	if got := f.client.countCall("messages"); got != 0 {
 		t.Errorf("Messages calls = %d, want 0 after a wait failure", got)
 	}
 	if !strings.Contains(readFileString(t, f.logPath), "wait") {
 		t.Errorf("log does not record the wait failure")
+	}
+}
+
+func TestAPIRunnerPromptFailureCleansUpSession(t *testing.T) {
+	f := newAPITestFixture(t)
+	f.client.onPrompt(func(context.Context, string, string) error {
+		return errors.New("prompt rejected")
+	})
+
+	_, err := f.runner.Run(context.Background(), f.req, f.logPath)
+	if err == nil || !strings.Contains(err.Error(), "prompt rejected") {
+		t.Fatalf("Run error = %v, want the prompt failure", err)
+	}
+	if got := f.client.countCall("interrupt"); got != 1 {
+		t.Errorf("Interrupt calls = %d, want 1 cleanup interrupt", got)
+	}
+	if got := f.restarts.count(); got != 0 {
+		t.Errorf("restart calls = %d, want 0 for a cleanup interrupt", got)
+	}
+	if got := f.client.countCall("wait"); got != 0 {
+		t.Errorf("Wait calls = %d, want 0 after a prompt failure", got)
+	}
+	if snap := f.client.snapshot(); snap.interruptCtxErr != nil {
+		t.Errorf("cleanup interrupt context error = %v, want a live background context", snap.interruptCtxErr)
+	}
+	if log := readFileString(t, f.logPath); !strings.Contains(log, "cleaned up") {
+		t.Errorf("log does not record the session cleanup")
+	}
+}
+
+func TestAPIRunnerMessagesFailureCleansUpSession(t *testing.T) {
+	f := newAPITestFixture(t)
+	f.client.onMessages(func(context.Context, string) ([]opencode.Message, error) {
+		return nil, errors.New("messages unavailable")
+	})
+
+	_, err := f.runner.Run(context.Background(), f.req, f.logPath)
+	if err == nil || !strings.Contains(err.Error(), "messages unavailable") {
+		t.Fatalf("Run error = %v, want the messages failure", err)
+	}
+	if got := f.client.countCall("interrupt"); got != 1 {
+		t.Errorf("Interrupt calls = %d, want 1 cleanup interrupt", got)
+	}
+	if got := f.restarts.count(); got != 0 {
+		t.Errorf("restart calls = %d, want 0 for a cleanup interrupt", got)
+	}
+	if snap := f.client.snapshot(); snap.interruptCtxErr != nil {
+		t.Errorf("cleanup interrupt context error = %v, want a live background context", snap.interruptCtxErr)
+	}
+	if log := readFileString(t, f.logPath); !strings.Contains(log, "cleaned up") {
+		t.Errorf("log does not record the session cleanup")
 	}
 }
 
@@ -544,6 +625,69 @@ func TestAPIRunnerCancelRestartsOnInterruptError(t *testing.T) {
 	}
 	if got := f.restarts.count(); got != 1 {
 		t.Errorf("restart calls = %d, want 1 after an interrupt error", got)
+	}
+}
+
+func TestAPIRunnerRestartAfterInterruptTimeoutUsesLiveContext(t *testing.T) {
+	f := newAPITestFixture(t)
+	f.runner.interruptWait = 20 * time.Millisecond
+
+	f.client.onWait(func(ctx context.Context, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	// An unresponsive interrupt consumes its whole budget before failing, which
+	// is exactly when the restart must not reuse that expired context.
+	f.client.onInterrupt(func(ctx context.Context, _ string) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	if _, err := f.runner.Run(ctx, f.req, f.logPath); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Run error = %v, want ErrTimeout", err)
+	}
+
+	snap := f.restarts.snapshot()
+	if snap.calls != 1 {
+		t.Fatalf("restart calls = %d, want 1", snap.calls)
+	}
+	if snap.ctxErr != nil {
+		t.Errorf("restart context error = %v, want a fresh live context", snap.ctxErr)
+	}
+	if !snap.hasDeadline {
+		t.Error("restart context has no deadline, want a bounded background context")
+	}
+}
+
+func TestAPIRunnerCancelRestartUsesLiveContext(t *testing.T) {
+	f := newAPITestFixture(t)
+	f.client.onInterrupt(func(context.Context, string) (bool, error) {
+		return false, errors.New("api server unavailable")
+	})
+	f.runner.mu.Lock()
+	f.runner.sessionID = apiFakeSessionID
+	f.runner.mu.Unlock()
+
+	// Task 11 may pass the already-cancelled job context to Cancel. The
+	// recovery restart must not inherit it.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := f.runner.Cancel(ctx); err != nil {
+		t.Fatalf("Cancel returned error: %v", err)
+	}
+	snap := f.restarts.snapshot()
+	if snap.calls != 1 {
+		t.Fatalf("restart calls = %d, want 1", snap.calls)
+	}
+	if snap.ctxErr != nil {
+		t.Errorf("restart context error = %v, want a fresh live context", snap.ctxErr)
+	}
+	if !snap.hasDeadline {
+		t.Error("restart context has no deadline, want a bounded background context")
 	}
 }
 
@@ -719,6 +863,57 @@ func TestAPIRunnerInterruptedOutcomeReturnsCancelled(t *testing.T) {
 	_, err := f.runner.Run(context.Background(), f.req, f.logPath)
 	if !errors.Is(err, ErrCancelled) {
 		t.Fatalf("Run error = %v, want ErrCancelled", err)
+	}
+}
+
+func TestAPIRunnerMissingOrUnknownOutcomeReturnsError(t *testing.T) {
+	cases := []struct {
+		name     string
+		messages []opencode.Message
+	}{
+		{
+			name: "missing idle",
+			messages: []opencode.Message{
+				{Type: "assistant", Content: []opencode.MessageContent{{Type: "text", Text: "summary"}}},
+			},
+		},
+		{
+			name: "empty outcome",
+			messages: []opencode.Message{
+				{Type: "assistant", Content: []opencode.MessageContent{{Type: "text", Text: "summary"}}},
+				{Type: "idle"},
+			},
+		},
+		{
+			name: "unknown outcome",
+			messages: []opencode.Message{
+				{Type: "assistant", Content: []opencode.MessageContent{{Type: "text", Text: "summary"}}},
+				{Type: "idle", Outcome: "cancelled"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAPITestFixture(t)
+			f.client.onMessages(func(context.Context, string) ([]opencode.Message, error) {
+				return tc.messages, nil
+			})
+
+			res, err := f.runner.Run(context.Background(), f.req, f.logPath)
+			if err == nil {
+				t.Fatal("Run returned a nil error for a non-succeeded outcome")
+			}
+			if errors.Is(err, ErrCancelled) || errors.Is(err, ErrTimeout) {
+				t.Errorf("outcome was reported as cancellation or timeout: %v", err)
+			}
+			if res.ExitCode != -1 {
+				t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+			}
+			if res.Summary != "summary" {
+				t.Errorf("Summary = %q, want the last assistant text", res.Summary)
+			}
+		})
 	}
 }
 

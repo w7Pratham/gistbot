@@ -20,8 +20,12 @@ const (
 	// healthy before the job fails.
 	apiHealthTimeout = 30 * time.Second
 	// apiInterruptGrace bounds the background interrupt issued after a job is
-	// cancelled or times out.
+	// cancelled, times out, or fails after its session was created.
 	apiInterruptGrace = 5 * time.Second
+	// apiRestartGrace bounds a restart triggered by an interrupt failure. It is
+	// deliberately separate from the interrupt budget: an interrupt that hangs
+	// until its deadline must not leave the restart with an expired context.
+	apiRestartGrace = 5 * time.Second
 	// apiAgent is the fixed OpenCode agent used for gist jobs.
 	apiAgent = "repo-scout"
 	// apiFallbackSummary is sent when the session produced no assistant text.
@@ -52,6 +56,11 @@ type APIRunner struct {
 	// interval stays at apiHealthInterval.
 	healthWait time.Duration
 
+	// interruptWait and restartWait bound background interrupts and the
+	// recovery restart. They are fields so tests can shorten the budgets.
+	interruptWait time.Duration
+	restartWait   time.Duration
+
 	mu              sync.Mutex
 	sessionID       string
 	logger          *log.Logger
@@ -63,10 +72,12 @@ type APIRunner struct {
 // health or interrupt failure is reported instead of recovered.
 func NewAPIRunner(client APIClient, unit string, restart func(context.Context) error) *APIRunner {
 	return &APIRunner{
-		client:     client,
-		unit:       unit,
-		restart:    restart,
-		healthWait: apiHealthTimeout,
+		client:        client,
+		unit:          unit,
+		restart:       restart,
+		healthWait:    apiHealthTimeout,
+		interruptWait: apiInterruptGrace,
+		restartWait:   apiRestartGrace,
 	}
 }
 
@@ -136,6 +147,7 @@ func (r *APIRunner) Run(ctx context.Context, req Request, logPath string) (RunRe
 			r.interruptAfterCancellation(sessionID, logger)
 			return RunResult{ExitCode: -1}, contextFailure(ctx)
 		}
+		r.cleanupSession(sessionID, logger)
 		return RunResult{ExitCode: -1}, fmt.Errorf("jobs: prompt API session: %w", err)
 	}
 	apiLogf(logger, "prompt: accepted for session %s", sessionID)
@@ -148,6 +160,7 @@ func (r *APIRunner) Run(ctx context.Context, req Request, logPath string) (RunRe
 	}
 	if waitErr != nil {
 		apiLogf(logger, "wait: failed: %v", waitErr)
+		r.cleanupSession(sessionID, logger)
 		if r.cancelWasRequested() {
 			return RunResult{ExitCode: -1}, ErrCancelled
 		}
@@ -162,6 +175,7 @@ func (r *APIRunner) Run(ctx context.Context, req Request, logPath string) (RunRe
 			r.interruptAfterCancellation(sessionID, logger)
 			return RunResult{ExitCode: -1}, contextFailure(ctx)
 		}
+		r.cleanupSession(sessionID, logger)
 		return RunResult{ExitCode: -1}, fmt.Errorf("jobs: read API session messages: %w", err)
 	}
 
@@ -173,13 +187,20 @@ func (r *APIRunner) Run(ctx context.Context, req Request, logPath string) (RunRe
 	apiLogf(logger, "outcome: session %s finished with %q", sessionID, outcome)
 
 	switch outcome {
+	case "succeeded":
+		return RunResult{ExitCode: 0, Summary: summary}, nil
 	case "failed":
 		return RunResult{ExitCode: -1, Summary: summary},
 			fmt.Errorf("jobs: API session %s ended with outcome failed", sessionID)
 	case "interrupted":
 		return RunResult{ExitCode: -1, Summary: summary}, ErrCancelled
+	case "":
+		return RunResult{ExitCode: -1, Summary: summary},
+			fmt.Errorf("jobs: API session %s has no idle outcome", sessionID)
+	default:
+		return RunResult{ExitCode: -1, Summary: summary},
+			fmt.Errorf("jobs: API session %s ended with unknown outcome %q", sessionID, outcome)
 	}
-	return RunResult{ExitCode: 0, Summary: summary}, nil
 }
 
 // Cancel interrupts the active API session. A failed interrupt triggers one
@@ -256,7 +277,8 @@ func (r *APIRunner) ensureHealthy(ctx context.Context, logger *log.Logger) error
 }
 
 // interrupt stops the session and recovers the API if the interrupt call
-// itself failed. It returns the restart error when recovery is impossible.
+// itself failed. The recovery restart uses its own fresh background context so
+// an interrupt that consumed its whole deadline cannot poison the restart.
 func (r *APIRunner) interrupt(ctx context.Context, sessionID string, logger *log.Logger) error {
 	interrupted, err := r.client.Interrupt(ctx, sessionID)
 	if err != nil {
@@ -265,12 +287,7 @@ func (r *APIRunner) interrupt(ctx context.Context, sessionID string, logger *log
 			return fmt.Errorf("jobs: interrupt API session: %w", err)
 		}
 		apiLogf(logger, "restart: requested after interrupt failure")
-		if restartErr := r.restart(ctx); restartErr != nil {
-			apiLogf(logger, "restart: failed: %v", restartErr)
-			return fmt.Errorf("jobs: restart OpenCode API %s: %w", r.unit, restartErr)
-		}
-		apiLogf(logger, "restart: complete")
-		return nil
+		return r.restartAfterInterrupt(logger)
 	}
 	if !interrupted {
 		apiLogf(logger, "interrupt: session %s was already idle; no restart", sessionID)
@@ -280,11 +297,42 @@ func (r *APIRunner) interrupt(ctx context.Context, sessionID string, logger *log
 	return nil
 }
 
+// restartAfterInterrupt restarts the API with a fresh bounded background
+// context. The context of the failed interrupt or cancel is never reused.
+func (r *APIRunner) restartAfterInterrupt(logger *log.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), r.restartWait)
+	defer cancel()
+	if err := r.restart(ctx); err != nil {
+		apiLogf(logger, "restart: failed: %v", err)
+		return fmt.Errorf("jobs: restart OpenCode API %s: %w", r.unit, err)
+	}
+	apiLogf(logger, "restart: complete")
+	return nil
+}
+
+// cleanupSession interrupts a session whose job failed after creation. The
+// interrupt uses a fresh background budget and never restarts the API; an
+// interrupt error is logged so the job can still report its original failure.
+func (r *APIRunner) cleanupSession(sessionID string, logger *log.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.interruptWait)
+	defer cancel()
+	interrupted, err := r.client.Interrupt(ctx, sessionID)
+	if err != nil {
+		apiLogf(logger, "interrupt: cleanup failed for session %s: %v", sessionID, err)
+		return
+	}
+	if !interrupted {
+		apiLogf(logger, "interrupt: cleanup found session %s already idle", sessionID)
+		return
+	}
+	apiLogf(logger, "interrupt: cleaned up session %s", sessionID)
+}
+
 // interruptAfterCancellation interrupts with a background budget so a
 // cancelled job context cannot prevent cleanup. The cancellation error is what
 // Run reports, so a recovery error is only logged.
 func (r *APIRunner) interruptAfterCancellation(sessionID string, logger *log.Logger) {
-	ctx, cancel := context.WithTimeout(context.Background(), apiInterruptGrace)
+	ctx, cancel := context.WithTimeout(context.Background(), r.interruptWait)
 	defer cancel()
 	if err := r.interrupt(ctx, sessionID, logger); err != nil {
 		apiLogf(logger, "error: interrupt cleanup: %v", err)
