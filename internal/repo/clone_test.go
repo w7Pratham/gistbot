@@ -325,6 +325,75 @@ func TestInstallReplacesOldRepo(t *testing.T) {
 	}
 }
 
+func TestInstallFirstInstallMovesStagedRepo(t *testing.T) {
+	workDir := t.TempDir()
+	target := mustTarget(t, "https://github.com/owner/repo")
+	finalDir := filepath.Join(workDir, target.ID)
+	jobDir := filepath.Join(workDir, ".work", "job-1")
+	repoDir := filepath.Join(jobDir, "repo")
+	writeRepoFile(t, filepath.Join(repoDir, "new.txt"), "new")
+
+	cloner := NewCloner(workDir, fakeGitPath(t), time.Second)
+	if err := cloner.Install(target, repoDir); err != nil {
+		t.Fatalf("Install returned error: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(finalDir, "new.txt"))
+	if err != nil {
+		t.Fatalf("read installed repo: %v", err)
+	}
+	if got, want := string(raw), "new"; got != want {
+		t.Errorf("new.txt = %q, want %q", got, want)
+	}
+	requireNotExist(t, repoDir)
+
+	info, err := os.Lstat(finalDir)
+	if err != nil {
+		t.Fatalf("lstat installed repo: %v", err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
+		t.Errorf("installed path mode = %v, want a real directory", info.Mode())
+	}
+
+	info, err = os.Stat(jobDir)
+	if err != nil {
+		t.Fatalf("job directory was removed by Install: %v", err)
+	}
+	if !info.IsDir() {
+		t.Errorf("job path mode = %v, want a directory", info.Mode())
+	}
+	if err := cloner.Abort(jobDir); err != nil {
+		t.Fatalf("Abort after install returned error: %v", err)
+	}
+	requireNotExist(t, jobDir)
+}
+
+func TestInstallRejectsNonDirectoryRepo(t *testing.T) {
+	workDir := t.TempDir()
+	target := mustTarget(t, "https://github.com/owner/repo")
+	repoDir := filepath.Join(workDir, ".work", "job-1", "repo")
+	if err := os.MkdirAll(filepath.Dir(repoDir), 0o700); err != nil {
+		t.Fatalf("create job directory: %v", err)
+	}
+	if err := os.WriteFile(repoDir, []byte("not a repository"), 0o600); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+
+	cloner := NewCloner(workDir, fakeGitPath(t), time.Second)
+	if err := cloner.Install(target, repoDir); err == nil {
+		t.Fatal("Install accepted a regular file as a staged repository")
+	}
+
+	requireNotExist(t, filepath.Join(workDir, target.ID))
+	info, err := os.Lstat(repoDir)
+	if err != nil {
+		t.Fatalf("staged file was removed: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Errorf("staged path mode = %v, want regular file", info.Mode())
+	}
+}
+
 func TestInstallRestoresOldOnRenameFailure(t *testing.T) {
 	workDir := t.TempDir()
 	target := mustTarget(t, "https://github.com/owner/repo")

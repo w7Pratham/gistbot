@@ -501,7 +501,7 @@ func validateStagedRepo(workRoot, repoDir string) error {
 		if info.Mode()&fs.ModeSymlink != 0 {
 			return errors.New("repo: staged repository path must not contain symlinks")
 		}
-		if current != repoDir && !info.IsDir() {
+		if !info.IsDir() {
 			return errors.New("repo: staged repository path is not a directory")
 		}
 	}
