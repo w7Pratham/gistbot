@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"gistbot/internal/bot"
 	"gistbot/internal/config"
 	"gistbot/internal/state"
 	"gistbot/internal/telegram"
@@ -32,6 +33,70 @@ const (
 	testOwnerID     = int64(4242)
 	testRepoID      = "github__owner__repo"
 )
+
+func TestRunRegistersCommandMenu(t *testing.T) {
+	t.Run("registers after deleteWebhook", func(t *testing.T) {
+		fake := newFakeTelegram(t)
+		env := newTestEnv(t, fake.server.URL)
+
+		handle := startRun(t, env.cfg, discardLogger())
+		waitFor(t, "command menu", func() bool { return fake.commandCallsCount() > 0 })
+		waitFor(t, "initial poll", func() bool { return fake.hasPollOffset(0) })
+		handle.stop(t)
+
+		got := fake.commandsCopy()
+		want := bot.CommandMenu()
+		if len(got) != len(want) {
+			t.Fatalf("registered commands = %d, want %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("command[%d] = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+
+		deleteAt := fake.eventIndex("deleteWebhook")
+		setAt := fake.eventIndex("setMyCommands")
+		pollAt := fake.eventIndex("getUpdates")
+		if deleteAt < 0 || setAt < 0 {
+			t.Fatalf("events = %v, want deleteWebhook and setMyCommands", fake.eventsCopy())
+		}
+		if deleteAt > setAt {
+			t.Errorf("setMyCommands ran before deleteWebhook: %v", fake.eventsCopy())
+		}
+		if pollAt >= 0 && setAt > pollAt {
+			t.Errorf("setMyCommands ran after polling started: %v", fake.eventsCopy())
+		}
+	})
+
+	t.Run("failure is logged and startup continues", func(t *testing.T) {
+		fake := newFakeTelegram(t)
+		fake.failSetMyCommands(http.StatusInternalServerError, "Internal Server Error")
+		env := newTestEnv(t, fake.server.URL)
+
+		logs := &syncBuffer{}
+		logger := slog.New(slog.NewTextHandler(logs, nil))
+		handle := startRun(t, env.cfg, logger)
+		waitFor(t, "initial poll after menu failure", func() bool {
+			return fake.hasPollOffset(0)
+		})
+		handle.stop(t)
+
+		if got := fake.commandCallsCount(); got == 0 {
+			t.Error("setMyCommands was not attempted")
+		}
+		logged := logs.String()
+		if !strings.Contains(logged, "command menu") {
+			t.Errorf("menu failure was not logged:\n%s", logged)
+		}
+		if strings.Contains(logged, testToken) {
+			t.Error("log output contains the Telegram token")
+		}
+		if strings.Contains(logged, testAPIPassword) {
+			t.Error("log output contains the OpenCode API password")
+		}
+	})
+}
 
 func TestRunDeletesWebhookAndPolls(t *testing.T) {
 	fake := newFakeTelegram(t)
@@ -491,6 +556,12 @@ type fakeTelegram struct {
 	edits       []sentEdit
 	documents   []sentDocument
 	mediaGroups []sentMediaGroup
+	events      []string
+
+	commandCalls int
+	commandCode  int
+	commandDesc  string
+	commands     []telegram.BotCommand
 }
 
 func newFakeTelegram(t *testing.T, updates ...telegram.Update) *fakeTelegram {
@@ -519,6 +590,15 @@ func (f *fakeTelegram) failDeleteWebhook(code int, description string) {
 	f.deleteDesc = description
 }
 
+// failSetMyCommands makes the next setMyCommands calls return a Bot API style
+// error. The command menu is optional, so this must not stop startup.
+func (f *fakeTelegram) failSetMyCommands(code int, description string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commandCode = code
+	f.commandDesc = description
+}
+
 func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	prefix := "/bot" + f.token + "/"
 	if !strings.HasPrefix(r.URL.Path, prefix) {
@@ -530,6 +610,7 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "deleteWebhook":
 		f.mu.Lock()
 		f.deleteCalls++
+		f.events = append(f.events, "deleteWebhook")
 		code, description := f.deleteCode, f.deleteDesc
 		f.mu.Unlock()
 		if code != 0 {
@@ -541,7 +622,37 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeTelegramResult(w, "true")
 
+	case "setMyCommands":
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		var commands []telegram.BotCommand
+		if raw := r.PostForm.Get("commands"); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &commands); err != nil {
+				http.Error(w, "invalid commands", http.StatusBadRequest)
+				return
+			}
+		}
+		f.mu.Lock()
+		f.commandCalls++
+		f.events = append(f.events, "setMyCommands")
+		f.commands = append([]telegram.BotCommand(nil), commands...)
+		code, description := f.commandCode, f.commandDesc
+		f.mu.Unlock()
+		if code != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			_, _ = io.WriteString(w,
+				fmt.Sprintf(`{"ok":false,"error_code":%d,"description":%q}`, code, description))
+			return
+		}
+		writeTelegramResult(w, "true")
+
 	case "getUpdates":
+		f.mu.Lock()
+		f.events = append(f.events, "getUpdates")
+		f.mu.Unlock()
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "invalid form", http.StatusBadRequest)
 			return
@@ -696,6 +807,36 @@ func (f *fakeTelegram) hasPollOffset(offset int64) bool {
 		}
 	}
 	return false
+}
+
+func (f *fakeTelegram) commandCallsCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.commandCalls
+}
+
+func (f *fakeTelegram) commandsCopy() []telegram.BotCommand {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]telegram.BotCommand(nil), f.commands...)
+}
+
+func (f *fakeTelegram) eventsCopy() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
+}
+
+// eventIndex returns the index of the first recorded event with name, or -1.
+func (f *fakeTelegram) eventIndex(name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, event := range f.events {
+		if event == name {
+			return i
+		}
+	}
+	return -1
 }
 
 func (f *fakeTelegram) messageCount() int {

@@ -131,7 +131,9 @@ func (b *Bot) Handle(ctx context.Context, u telegram.Update) {
 	chatID := message.Chat.ID
 
 	switch command {
-	case "start", "help":
+	case "start":
+		b.handleStart(ctx, chatID)
+	case "help":
 		b.handleHelp(ctx, chatID)
 	case "gist":
 		b.handleGist(ctx, chatID, args)
@@ -270,26 +272,6 @@ func (b *Bot) sendDocAlbum(ctx context.Context, chatID int64, docs repo.Docs) {
 	}
 }
 
-// sendDocuments uploads documents separately with the historical one-second
-// pacing. The browse view still uses this; the job notification uses
-// sendDocAlbum.
-func (b *Bot) sendDocuments(ctx context.Context, chatID int64, docs repo.Docs) {
-	for _, name := range presentDocNames(docs.Files) {
-		if err := b.wait(ctx, docSendDelay); err != nil {
-			b.logWarn("wait before sending document", "error", err)
-			return
-		}
-		data, err := readDoc(docs.Files[name])
-		if err != nil {
-			b.logWarn("read gist document", "doc", name, "error", err)
-			continue
-		}
-		if err := b.sender.SendDocument(ctx, chatID, name+".md", data); err != nil {
-			b.logWarn("send gist document", "doc", name, "error", err)
-		}
-	}
-}
-
 // sendLogFile attaches the job log, capped to its most recent 5 MiB.
 func (b *Bot) sendLogFile(ctx context.Context, chatID int64, res jobs.Result) {
 	if res.LogPath == "" {
@@ -368,12 +350,6 @@ func (b *Bot) send(ctx context.Context, chatID int64, html string) {
 // reply sends plain text after escaping and truncating it.
 func (b *Bot) reply(ctx context.Context, chatID int64, text string) {
 	b.send(ctx, chatID, telegram.EscapeAndTruncate(text, maxMessageUTF16))
-}
-
-// replyPre sends plain text inside a <pre> block. Only the content is escaped;
-// the tags are constants.
-func (b *Bot) replyPre(ctx context.Context, chatID int64, text string) {
-	b.send(ctx, chatID, preBlock(telegram.EscapeAndTruncate(text, maxMessageUTF16-preOverhead)))
 }
 
 // wait uses the injected sleep when present.

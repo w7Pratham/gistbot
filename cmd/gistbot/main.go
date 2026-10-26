@@ -88,6 +88,10 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	if err := telegramClient.DeleteWebhook(ctx); err != nil {
 		return fmt.Errorf("delete telegram webhook: %w", err)
 	}
+	if err := telegramClient.SetMyCommands(ctx, bot.CommandMenu()); err != nil {
+		// The menu is a convenience; polling must still start.
+		logger.Warn("register telegram command menu", "error", err)
+	}
 
 	apiClient := opencode.NewClient(cfg.OpenCodeAPI, cfg.OpenCodeAPIPassword)
 	apiRunner := jobs.NewAPIRunner(apiClient, cfg.OpenCodeUnit, func(restartCtx context.Context) error {

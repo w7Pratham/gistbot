@@ -69,7 +69,7 @@ func addJobRecord(t *testing.T, f *botFixture, id, repoID string, started time.T
 	}
 }
 
-func TestListShowsDisplayNameAndDateNewestFirst(t *testing.T) {
+func TestListIsCompact(t *testing.T) {
 	f := newBotFixture(t)
 
 	older := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.Local)
@@ -90,10 +90,11 @@ func TestListShowsDisplayNameAndDateNewestFirst(t *testing.T) {
 	}
 	text := texts[0]
 
+	requireNotContains(t, text, "<pre>")
+	requireContains(t, text, "<b>Installed</b>")
 	for _, want := range []string{
-		"<pre>",
-		"beta/two — 2026-02-03 04:05 — observation",
-		"alpha/one — 2026-01-02 03:04 — codemap,routing",
+		"<code>beta/two · 2026-02-03 04:05 · observation</code>",
+		"<code>alpha/one · 2026-01-02 03:04 · codemap,routing</code>",
 	} {
 		requireContains(t, text, want)
 	}
@@ -106,42 +107,99 @@ func TestListShowsDisplayNameAndDateNewestFirst(t *testing.T) {
 	requireNotContains(t, text, f.cfg.WorkDir)
 }
 
-func TestShowAllDocsSendsThreeFiles(t *testing.T) {
+func TestShowWithoutArgsUsesNewestRepo(t *testing.T) {
+	f := newBotFixture(t)
+
+	older := time.Date(2026, time.January, 2, 3, 4, 0, 0, time.Local)
+	newer := time.Date(2026, time.February, 3, 4, 5, 0, 0, time.Local)
+	installRepo(t, f, "alpha", "one", map[string]string{
+		"codemap": "ALPHA CODEMAP",
+	}, older)
+	installRepo(t, f, "beta", "two", map[string]string{
+		"observation": "BETA OBSERVATION",
+	}, newer)
+
+	f.handle(privateUpdate("/show"))
+
+	sent := f.sender.sentDocuments()
+	if len(sent) != 1 {
+		t.Fatalf("documents = %d, want the newest repo's single doc", len(sent))
+	}
+	if sent[0].filename != "observation.md" || string(sent[0].data) != "BETA OBSERVATION" {
+		t.Errorf("document = %q %q, want the newest repo's observation",
+			sent[0].filename, sent[0].data)
+	}
+
+	t.Run("no repositories", func(t *testing.T) {
+		empty := newBotFixture(t)
+		empty.handle(privateUpdate("/show"))
+
+		texts := empty.sender.messageTexts()
+		if len(texts) != 1 {
+			t.Fatalf("messages = %d, want 1", len(texts))
+		}
+		requireContains(t, texts[0], "No repositories installed")
+	})
+}
+
+func TestShowSendsAlbumForTwoOrMoreDocs(t *testing.T) {
 	cases := []struct {
 		label string
 		arg   string
+		docs  map[string]string
+		names []string
 	}{
-		{label: "display name", arg: "example/project"},
-		{label: "canonical id", arg: "github__example__project"},
+		{
+			label: "display name all docs",
+			arg:   "example/project",
+			docs: map[string]string{
+				"codemap":     "CODEMAP",
+				"routing":     "ROUTING",
+				"observation": "OBSERVATION",
+			},
+			names: []string{"codemap.md", "routing.md", "observation.md"},
+		},
+		{
+			label: "canonical id two docs",
+			arg:   "github__example__project",
+			docs: map[string]string{
+				"codemap": "CODEMAP",
+				"routing": "ROUTING",
+			},
+			names: []string{"codemap.md", "routing.md"},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.label, func(t *testing.T) {
 			f := newBotFixture(t)
-			installRepo(t, f, "example", "project", map[string]string{
-				"codemap":     "CODEMAP",
-				"routing":     "ROUTING",
-				"observation": "OBSERVATION",
-			}, time.Time{})
+			installRepo(t, f, "example", "project", tc.docs, time.Time{})
 
 			f.handle(privateUpdate("/show " + tc.arg))
 
-			sent := f.sender.sentDocuments()
-			if len(sent) != 3 {
-				t.Fatalf("documents = %d, want 3", len(sent))
+			if got := len(f.sender.sentDocuments()); got != 0 {
+				t.Errorf("separate documents = %d, want 0", got)
 			}
-			wantNames := []string{"codemap.md", "routing.md", "observation.md"}
-			wantBodies := []string{"CODEMAP", "ROUTING", "OBSERVATION"}
-			for i, doc := range sent {
-				if doc.chatID != testChatID {
-					t.Errorf("document[%d] chatID = %d, want %d", i, doc.chatID, testChatID)
+			groups := f.sender.sentGroups()
+			if len(groups) != 1 {
+				t.Fatalf("media groups = %d, want 1", len(groups))
+			}
+			if groups[0].chatID != testChatID {
+				t.Errorf("album chat ID = %d, want %d", groups[0].chatID, testChatID)
+			}
+			if len(groups[0].docs) != len(tc.names) {
+				t.Fatalf("album docs = %d, want %d", len(groups[0].docs), len(tc.names))
+			}
+			for i, doc := range groups[0].docs {
+				if doc.Filename != tc.names[i] {
+					t.Errorf("album[%d] filename = %q, want %q", i, doc.Filename, tc.names[i])
 				}
-				if doc.filename != wantNames[i] {
-					t.Errorf("document[%d] filename = %q, want %q", i, doc.filename, wantNames[i])
+				if want := tc.docs[strings.TrimSuffix(tc.names[i], ".md")]; string(doc.Data) != want {
+					t.Errorf("album[%d] body = %q, want %q", i, doc.Data, want)
 				}
-				if string(doc.data) != wantBodies[i] {
-					t.Errorf("document[%d] body = %q, want %q", i, doc.data, wantBodies[i])
-				}
+			}
+			if len(f.sleeps) != 0 {
+				t.Errorf("sleeps = %v, want none for one album", f.sleeps)
 			}
 		})
 	}
@@ -307,7 +365,7 @@ func TestShowRejectsSymlinkDoc(t *testing.T) {
 	})
 }
 
-func TestLogCurrentJobTail40(t *testing.T) {
+func TestLogSendsTailAndLogFile(t *testing.T) {
 	f := newBotFixture(t)
 	f.jobs.status = jobs.Status{Running: &jobs.JobView{
 		ID:     "job-current",
@@ -315,7 +373,7 @@ func TestLogCurrentJobTail40(t *testing.T) {
 	}}
 
 	var log strings.Builder
-	for i := 1; i <= 60; i++ {
+	for i := 1; i <= 20; i++ {
 		fmt.Fprintf(&log, "line-%02d\n", i)
 	}
 	writeJobLog(t, f, "job-current", log.String())
@@ -327,17 +385,27 @@ func TestLogCurrentJobTail40(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(texts))
 	}
 	text := texts[0]
-	if !strings.HasPrefix(text, "<pre>") || !strings.HasSuffix(text, "</pre>") {
-		t.Errorf("log is not wrapped in <pre>: %q", text)
-	}
-	for _, want := range []string{"line-21", "line-60"} {
+	requireContains(t, text, "<b>Log</b>")
+	requireContains(t, text, "example/project")
+	requireContains(t, text, "job-current")
+	requireContains(t, text, "<pre>")
+	for _, want := range []string{"line-11", "line-20"} {
 		requireContains(t, text, want)
 	}
-	for _, unwanted := range []string{"line-20", "line-01"} {
-		requireNotContains(t, text, unwanted)
-	}
+	requireNotContains(t, text, "line-10")
 	if got := utf16Count(text); got > maxMessageUTF16 {
-		t.Errorf("log is %d UTF-16 units, want <= %d", got, maxMessageUTF16)
+		t.Errorf("log card is %d UTF-16 units, want <= %d", got, maxMessageUTF16)
+	}
+
+	sent := f.sender.sentDocuments()
+	if len(sent) != 1 {
+		t.Fatalf("documents = %d, want the full log file", len(sent))
+	}
+	if sent[0].filename != "job-current.log" {
+		t.Errorf("log filename = %q, want job-current.log", sent[0].filename)
+	}
+	if string(sent[0].data) != log.String() {
+		t.Error("log attachment does not match the full job log")
 	}
 }
 
@@ -376,6 +444,21 @@ func TestLogByRepoUsesLatestJob(t *testing.T) {
 	}
 	requireContains(t, texts[2], "other-log")
 	requireNotContains(t, texts[2], "newest-log")
+
+	sent := f.sender.sentDocuments()
+	wantNames := []string{"job-newest.log", "job-newest.log", "job-other.log"}
+	wantBodies := []string{"newest-log\n", "newest-log\n", "other-log\n"}
+	if len(sent) != len(wantNames) {
+		t.Fatalf("documents = %d, want %d log files", len(sent), len(wantNames))
+	}
+	for i, doc := range sent {
+		if doc.filename != wantNames[i] {
+			t.Errorf("document[%d] filename = %q, want %q", i, doc.filename, wantNames[i])
+		}
+		if string(doc.data) != wantBodies[i] {
+			t.Errorf("document[%d] body = %q, want %q", i, doc.data, wantBodies[i])
+		}
+	}
 }
 
 func TestLogIsEscapedAndUnder4096(t *testing.T) {
@@ -409,4 +492,7 @@ func TestLogIsEscapedAndUnder4096(t *testing.T) {
 	requireContains(t, text, "&amp;")
 	// Truncation drops the oldest lines, not the newest output.
 	requireContains(t, text, "LAST-LINE")
+	if got := len(f.sender.sentDocuments()); got != 1 {
+		t.Errorf("documents = %d, want the full log file", got)
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"gistbot/internal/jobs"
 	"gistbot/internal/repo"
 	"gistbot/internal/state"
+	"gistbot/internal/telegram"
 )
 
 const (
@@ -56,8 +57,28 @@ func parseCommand(text string) (string, []string, bool) {
 	return strings.ToLower(name), fields[1:], true
 }
 
+// CommandMenu returns the Telegram command menu registered at startup. The
+// slice is rebuilt on every call so callers cannot mutate the menu.
+func CommandMenu() []telegram.BotCommand {
+	return []telegram.BotCommand{
+		{Command: "gist", Description: "Write gist docs for a repo"},
+		{Command: "status", Description: "Show the running job and queue"},
+		{Command: "cancel", Description: "Stop the running job"},
+		{Command: "list", Description: "List installed repos"},
+		{Command: "show", Description: "Resend installed docs"},
+		{Command: "log", Description: "Show the latest job log"},
+		{Command: "model", Description: "Show or select a model"},
+		{Command: "runner", Description: "Show or select a runner"},
+		{Command: "help", Description: "Show commands"},
+	}
+}
+
+func (b *Bot) handleStart(ctx context.Context, chatID int64) {
+	b.send(ctx, chatID, b.startText())
+}
+
 func (b *Bot) handleHelp(ctx context.Context, chatID int64) {
-	b.replyPre(ctx, chatID, b.helpText())
+	b.send(ctx, chatID, b.helpText())
 }
 
 func (b *Bot) handleGist(ctx context.Context, chatID int64, args []string) {
@@ -141,8 +162,7 @@ func (b *Bot) handleStatus(ctx context.Context, chatID int64) {
 		b.reply(ctx, chatID, "Jobs are not available.")
 		return
 	}
-	text := b.settingsText() + "\n\n" + statusText(b.jobs.Status())
-	b.replyPre(ctx, chatID, text)
+	b.send(ctx, chatID, statusText(b.jobs.Status()))
 }
 
 func (b *Bot) handleCancel(ctx context.Context, chatID int64) {
@@ -162,7 +182,7 @@ func (b *Bot) handleCancel(ctx context.Context, chatID int64) {
 // override or "reset" to fall back to the configured free model.
 func (b *Bot) handleModel(ctx context.Context, chatID int64, args []string) {
 	if len(args) == 0 {
-		b.reply(ctx, chatID, strings.Join(b.modelLines(), "\n"))
+		b.send(ctx, chatID, b.modelHTML())
 		return
 	}
 	if b.state == nil {
@@ -189,7 +209,7 @@ func (b *Bot) handleModel(ctx context.Context, chatID int64, args []string) {
 				b.reply(ctx, chatID, "Could not save the model selection.")
 				return
 			}
-			b.reply(ctx, chatID, strings.Join(b.modelLines(), "\n"))
+			b.send(ctx, chatID, b.modelHTML())
 		default:
 			value := strings.TrimSpace(args[1])
 			if !b.validateFreeModel(ctx, chatID, value) {
@@ -205,7 +225,7 @@ func (b *Bot) handleModel(ctx context.Context, chatID int64, args []string) {
 				b.reply(ctx, chatID, "Could not save the model selection.")
 				return
 			}
-			b.reply(ctx, chatID, strings.Join(b.modelLines(), "\n"))
+			b.send(ctx, chatID, b.modelHTML())
 		}
 	case aliasFlash, aliasPro:
 		if len(args) > 1 {
@@ -226,7 +246,7 @@ func (b *Bot) persistAlias(ctx context.Context, chatID int64, alias string) {
 		b.reply(ctx, chatID, "Could not save the model selection.")
 		return
 	}
-	b.reply(ctx, chatID, strings.Join(b.modelLines(), "\n"))
+	b.send(ctx, chatID, b.modelHTML())
 }
 
 // validateFreeModel checks that raw is provider/model[#variant] and that the
@@ -258,46 +278,29 @@ func (b *Bot) validateFreeModel(ctx context.Context, chatID int64, raw string) b
 	return false
 }
 
-// modelLines renders the alias, resolved reference, free default, and current
-// override for /model.
-func (b *Bot) modelLines() []string {
-	data := state.Data{}
-	if b.state != nil {
-		data = b.state.Snapshot()
-	}
+// modelHTML renders the current model and one compact usage hint.
+func (b *Bot) modelHTML() string {
+	data := b.stateData()
+
 	alias := data.Model
 	if alias == "" {
 		alias = b.cfg.DefaultModel
 	}
-	override := strings.TrimSpace(data.FreeModel)
-
 	model := alias
-	if ref, err := b.cfg.ResolveModel(alias, override); err == nil {
+	if ref, err := b.cfg.ResolveModel(alias, data.FreeModel); err == nil {
 		model = aliasWithRef(alias, ref)
 	}
 
-	freeDefault := "not configured"
-	if ref, ok := b.cfg.Models[aliasFree]; ok && (ref.ProviderID != "" || ref.ModelID != "") {
-		freeDefault = ref.String()
-	}
-
-	shownOverride := "none"
-	if override != "" {
-		shownOverride = override
-	}
-
-	return []string{
-		"Model: " + model,
-		"Free default: " + freeDefault,
-		"Free override: " + shownOverride,
-		"Aliases: free, flash, pro",
-	}
+	return strings.Join([]string{
+		"<b>Model</b> · <code>" + cardEscape(model) + "</code>",
+		"<code>/model free|flash|pro</code> — select, or <code>/model free provider/model[#variant]</code>",
+	}, "\n")
 }
 
 // handleRunner shows the selected runner or persists cli/api.
 func (b *Bot) handleRunner(ctx context.Context, chatID int64, args []string) {
 	if len(args) == 0 {
-		b.reply(ctx, chatID, "Runner: "+b.activeRunner())
+		b.send(ctx, chatID, runnerHTML(b.activeRunner()))
 		return
 	}
 	if len(args) > 1 {
@@ -317,47 +320,47 @@ func (b *Bot) handleRunner(ctx context.Context, chatID int64, args []string) {
 			b.reply(ctx, chatID, "Could not save the runner selection.")
 			return
 		}
-		b.reply(ctx, chatID, "Runner: "+runner)
+		b.send(ctx, chatID, runnerHTML(runner))
 	default:
 		b.reply(ctx, chatID, "Unknown runner. Use cli or api.")
 	}
 }
 
-// settingsText renders the active runner, model, and free override for /status.
-func (b *Bot) settingsText() string {
-	data := state.Data{}
-	if b.state != nil {
-		data = b.state.Snapshot()
-	}
-	alias := data.Model
-	if alias == "" {
-		alias = b.cfg.DefaultModel
-	}
-	override := strings.TrimSpace(data.FreeModel)
-
-	model := alias
-	if ref, err := b.cfg.ResolveModel(alias, override); err == nil {
-		model = aliasWithRef(alias, ref)
-	}
-
-	shownOverride := "none"
-	if override != "" {
-		shownOverride = override
-	}
-
+// runnerHTML renders the current runner and one compact usage hint.
+func runnerHTML(value string) string {
 	return strings.Join([]string{
-		"Runner: " + b.activeRunner(),
-		"Model: " + model,
-		"Free override: " + shownOverride,
+		"<b>Runner</b> · <code>" + cardEscape(value) + "</code>",
+		"<code>/runner cli|api</code> — select",
 	}, "\n")
+}
+
+// stateData returns the persisted selection state, or zero data when no store
+// is configured.
+func (b *Bot) stateData() state.Data {
+	if b.state == nil {
+		return state.Data{}
+	}
+	return b.state.Snapshot()
+}
+
+// settingsFooter renders the one compact current-settings line shared by
+// /start and /help: model alias, runner, and job state.
+func (b *Bot) settingsFooter() string {
+	data := b.stateData()
+	model := data.Model
+	if model == "" {
+		model = b.cfg.DefaultModel
+	}
+	if model == "" {
+		model = "unknown"
+	}
+	return "<code>" + cardEscape(model+" · "+b.activeRunner()+" · "+b.jobStateText()) + "</code>"
 }
 
 // activeRunner returns the persisted runner or the configured default.
 func (b *Bot) activeRunner() string {
-	runner := ""
-	if b.state != nil {
-		runner = b.state.Snapshot().Runner
-	}
+	data := b.stateData()
+	runner := data.Runner
 	if runner == "" {
 		runner = b.cfg.DefaultRunner
 	}
@@ -418,56 +421,46 @@ func (b *Bot) currentSelection() (selection, error) {
 	}, nil
 }
 
-// helpText lists the commands and the current model, free override, runner, and
-// job state. Commands introduced in later tasks are listed here already.
-func (b *Bot) helpText() string {
-	data := state.Data{}
-	if b.state != nil {
-		data = b.state.Snapshot()
-	}
-
-	alias := data.Model
-	if alias == "" {
-		alias = b.cfg.DefaultModel
-	}
-	runner := data.Runner
-	if runner == "" {
-		runner = b.cfg.DefaultRunner
-	}
-
-	model := alias
-	if ref, err := b.cfg.ResolveModel(alias, data.FreeModel); err == nil &&
-		(ref.ProviderID != "" || ref.ModelID != "") {
-		model = alias + " (" + ref.String() + ")"
-	}
-
-	free := "none"
-	if override := strings.TrimSpace(data.FreeModel); override != "" {
-		free = override
-	}
-
+// startText is the restrained first-run page: a short intro, the first command
+// to try, and one current-settings footer.
+func (b *Bot) startText() string {
 	return strings.Join([]string{
-		"Zero Two",
+		"<b>Zero Two</b>",
+		"Send a GitHub repo and I'll write its gist docs — quietly.",
 		"",
-		"Commands",
-		"/gist <github-url> [focus] — write gist docs for a repository",
-		"/status — show the running job and queued jobs",
-		"/cancel — stop the running job",
-		"/list — list installed repositories",
-		"/show <repo> [doc] — resend installed gist docs",
-		"/log [repo] — show the latest job log",
-		"/model [alias] — show or select a model",
-		"/runner [cli|api] — show or select a runner",
-		"/help — show this help",
+		commandHelpLine("/gist url [focus]", "start a job"),
+		commandHelpLine("/help", "all commands"),
 		"",
-		"Model: " + model,
-		"Free override: " + free,
-		"Runner: " + runner,
-		"Job: " + b.jobStateText(),
+		b.settingsFooter(),
 	}, "\n")
 }
 
-// jobStateText summarizes the manager state for /help.
+// helpText is the compact command list. Every command is one line, and the
+// current model, runner, and job state appear exactly once in the footer.
+func (b *Bot) helpText() string {
+	return strings.Join([]string{
+		"<b>02</b> · commands",
+		"",
+		commandHelpLine("/gist url [focus]", "docs for a repo"),
+		commandHelpLine("/status", "running job and queue"),
+		commandHelpLine("/cancel", "stop the running job"),
+		commandHelpLine("/list", "installed repos"),
+		commandHelpLine("/show [repo] [doc]", "resend installed docs"),
+		commandHelpLine("/log [repo]", "tail and .log file"),
+		commandHelpLine("/model [alias]", "show or select a model"),
+		commandHelpLine("/runner [cli|api]", "show or select a runner"),
+		commandHelpLine("/help", "this page"),
+		"",
+		b.settingsFooter(),
+	}, "\n")
+}
+
+// commandHelpLine renders one monospaced command with its purpose.
+func commandHelpLine(usage, description string) string {
+	return "<code>" + cardEscape(usage) + "</code> — " + cardEscape(description)
+}
+
+// jobStateText summarizes the manager state for the settings footer.
 func (b *Bot) jobStateText() string {
 	if b.jobs == nil {
 		return "unknown"
@@ -482,28 +475,7 @@ func (b *Bot) jobStateText() string {
 	return "idle"
 }
 
-// statusText renders the running job and the queued positions for /status.
-func statusText(status jobs.Status) string {
-	var lines []string
-	if status.Running != nil {
-		lines = append(lines, "Running", jobLine(*status.Running, true))
-	} else {
-		lines = append(lines, "No job running.")
-	}
-
-	if len(status.Queued) > 0 {
-		lines = append(lines, "", "Queued")
-		for i, job := range status.Queued {
-			lines = append(lines, fmt.Sprintf("#%d %s", i+1, jobLine(job, false)))
-		}
-	} else if status.Running == nil {
-		lines = []string{"No jobs running."}
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// jobLine renders the fields shared by running and queued job views.
+// jobLine renders the fields shared by queued job views.
 func jobLine(view jobs.JobView, withElapsed bool) string {
 	parts := []string{displayRepo(view.RepoID)}
 	if view.Model != "" {

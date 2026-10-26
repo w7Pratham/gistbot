@@ -3,7 +3,6 @@ package bot
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"gistbot/internal/config"
@@ -38,7 +37,7 @@ func (f *botFixture) lastMessage(t *testing.T) string {
 	return texts[len(texts)-1]
 }
 
-func TestModelShowsCurrentAndAliases(t *testing.T) {
+func TestModelOutputIsCompact(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		f := newBotFixture(t)
 
@@ -46,12 +45,18 @@ func TestModelShowsCurrentAndAliases(t *testing.T) {
 
 		text := f.lastMessage(t)
 		for _, want := range []string{
-			"Model: flash (test/flash)",
-			"Free default: test/free",
-			"Free override: none",
-			"free", "flash", "pro",
+			"Model", "flash (test/flash)", "/model", "free", "pro",
 		} {
 			requireContains(t, text, want)
+		}
+		requireContains(t, text, "<code>")
+		for _, unwanted := range []string{
+			"Free default:", "Free override:", "Aliases:",
+		} {
+			requireNotContains(t, text, unwanted)
+		}
+		if got := utf16Count(text); got > 400 {
+			t.Errorf("model output = %d UTF-16 units, want compact", got)
 		}
 	})
 
@@ -65,9 +70,8 @@ func TestModelShowsCurrentAndAliases(t *testing.T) {
 		f.handle(privateUpdate("/model"))
 
 		text := f.lastMessage(t)
-		requireContains(t, text, "Model: free (test/pro#high)")
-		requireContains(t, text, "Free default: test/free")
-		requireContains(t, text, "Free override: test/pro#high")
+		requireContains(t, text, "free (test/pro#high)")
+		requireNotContains(t, text, "Free default:")
 	})
 }
 
@@ -79,7 +83,7 @@ func TestModelSetsAliasAndPersists(t *testing.T) {
 	if data.Model != "pro" {
 		t.Errorf("persisted Model = %q, want pro", data.Model)
 	}
-	requireContains(t, f.lastMessage(t), "Model: pro (test/pro#high)")
+	requireContains(t, f.lastMessage(t), "pro (test/pro#high)")
 
 	f.handle(privateUpdate("/model free"))
 	data = f.reopenState(t)
@@ -114,8 +118,7 @@ func TestModelFreeOverrideValidatesInstalledID(t *testing.T) {
 		t.Errorf("persisted FreeModel = %q, want test/pro", data.FreeModel)
 	}
 	text := f.lastMessage(t)
-	requireContains(t, text, "Free override: test/pro")
-	requireContains(t, text, "Model: free (test/pro)")
+	requireContains(t, text, "free (test/pro)")
 
 	f.handle(privateUpdate("/model free test/flash"))
 	data = f.reopenState(t)
@@ -145,7 +148,7 @@ func TestModelFreeOverrideAcceptsVariantSuffix(t *testing.T) {
 	if data.FreeModel != "test/pro#high" {
 		t.Errorf("persisted FreeModel = %q, want test/pro#high", data.FreeModel)
 	}
-	requireContains(t, f.lastMessage(t), "Model: free (test/pro#high)")
+	requireContains(t, f.lastMessage(t), "free (test/pro#high)")
 
 	f.handle(privateUpdate("/gist https://github.com/example/project"))
 	requests := f.jobs.requestList()
@@ -235,8 +238,8 @@ func TestModelFreeResetReturnsToEnvDefault(t *testing.T) {
 
 	f.handle(privateUpdate("/model"))
 	text := f.lastMessage(t)
-	requireContains(t, text, "Model: free (test/free)")
-	requireContains(t, text, "Free override: none")
+	requireContains(t, text, "free (test/free)")
+	requireNotContains(t, text, "Free override")
 
 	f.handle(privateUpdate("/gist https://github.com/example/project"))
 	requests := f.jobs.requestList()
@@ -251,26 +254,36 @@ func TestModelFreeResetReturnsToEnvDefault(t *testing.T) {
 	}
 }
 
-func TestRunnerShowsAndSetsCLIOrAPI(t *testing.T) {
+func TestRunnerOutputIsCompact(t *testing.T) {
 	f := newBotFixture(t)
 
 	f.handle(privateUpdate("/runner"))
-	requireContains(t, f.lastMessage(t), "Runner: cli")
+	text := f.lastMessage(t)
+	requireContains(t, text, "Runner")
+	requireContains(t, text, "cli")
+	requireContains(t, text, "/runner cli|api")
+	requireNotContains(t, text, "Runner: ")
 
 	f.handle(privateUpdate("/runner api"))
 	if got := f.reopenState(t).Runner; got != "api" {
 		t.Errorf("persisted Runner = %q, want api", got)
 	}
-	requireContains(t, f.lastMessage(t), "Runner: api")
+	text = f.lastMessage(t)
+	requireContains(t, text, "Runner")
+	requireContains(t, text, "api")
+	requireNotContains(t, text, "Runner: ")
 
 	f.handle(privateUpdate("/runner"))
-	requireContains(t, f.lastMessage(t), "Runner: api")
+	requireContains(t, f.lastMessage(t), "api")
 
 	f.handle(privateUpdate("/runner CLI"))
 	if got := f.reopenState(t).Runner; got != "cli" {
 		t.Errorf("persisted Runner = %q, want cli", got)
 	}
-	requireContains(t, f.lastMessage(t), "Runner: cli")
+	requireContains(t, f.lastMessage(t), "cli")
+	if got := utf16Count(f.lastMessage(t)); got > 200 {
+		t.Errorf("runner output = %d UTF-16 units, want compact", got)
+	}
 }
 
 func TestRunnerRejectsUnknownValue(t *testing.T) {
@@ -379,26 +392,5 @@ func TestNextJobUsesNewRunnerAndModel(t *testing.T) {
 	want := config.ModelRef{ProviderID: "test", ModelID: "pro", Variant: "high"}
 	if third.Model != want || third.ModelAlias != "free" {
 		t.Errorf("third model = %v/%q, want %v/free", third.Model, third.ModelAlias, want)
-	}
-}
-
-func TestRunnerAndModelSettingsAppearInStatus(t *testing.T) {
-	f := newBotFixture(t)
-
-	f.handle(privateUpdate("/model free test/pro#high"))
-	f.handle(privateUpdate("/runner api"))
-	f.handle(privateUpdate("/status"))
-
-	text := f.lastMessage(t)
-	for _, want := range []string{
-		"Runner: api",
-		"Model: free (test/pro#high)",
-		"Free override: test/pro#high",
-		"No jobs running",
-	} {
-		requireContains(t, text, want)
-	}
-	if strings.Contains(text, "Free override: none") {
-		t.Errorf("status text still shows the cleared override:\n%s", text)
 	}
 }

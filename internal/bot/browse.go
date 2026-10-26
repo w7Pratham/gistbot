@@ -17,8 +17,8 @@ import (
 const (
 	// listTimeLayout is the timestamp format used by /list.
 	listTimeLayout = "2006-01-02 15:04"
-	// logCommandLines is how many log lines /log shows.
-	logCommandLines = 40
+	// maxLogCardLines is how many log lines /log shows in the chat card.
+	maxLogCardLines = 10
 )
 
 // jobIDPattern mirrors the job manager's path-safety rule. A job ID is read
@@ -26,8 +26,8 @@ const (
 // validated before it becomes a file name under LOG_DIR.
 var jobIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
-// handleList replies with one line per installed repository, newest documents
-// first.
+// handleList replies with a compact header and one line per installed
+// repository, newest documents first.
 func (b *Bot) handleList(ctx context.Context, chatID int64) {
 	entries, err := repo.List(b.cfg.WorkDir)
 	if err != nil {
@@ -40,35 +40,46 @@ func (b *Bot) handleList(ctx context.Context, chatID int64) {
 		return
 	}
 
-	lines := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		lines = append(lines, fmt.Sprintf("%s — %s — %s",
-			entry.Display,
-			entry.ModTime.Format(listTimeLayout),
-			strings.Join(entry.Docs, ",")))
-	}
-	b.replyPre(ctx, chatID, strings.Join(lines, "\n"))
+	b.send(ctx, chatID, listText(entries))
 }
 
-// handleShow resends installed gist documents. The repository argument must be
-// a displayed owner/repo or a canonical repository ID and must already be
-// installed; the document argument is one of the canonical names with an
-// optional .md suffix. No caller-supplied value ever becomes a path.
+// handleShow resends installed gist documents. With no argument it uses the
+// newest installed repository. Otherwise the repository must be a displayed
+// owner/repo or a canonical repository ID and must already be installed; the
+// optional document is one of the canonical names with an optional .md suffix.
+// No caller-supplied value ever becomes a path.
 func (b *Bot) handleShow(ctx context.Context, chatID int64, args []string) {
-	if len(args) == 0 || len(args) > 2 {
-		b.reply(ctx, chatID, "Usage: /show <owner/repo|repo-id> [codemap|routing|observation]")
+	if len(args) > 2 {
+		b.reply(ctx, chatID, "Usage: /show [owner/repo|repo-id] [codemap|routing|observation]")
 		return
 	}
 
-	entry, found, err := b.installedRepo(args[0])
-	if err != nil {
-		b.logWarn("list repositories", "error", err)
-		b.reply(ctx, chatID, "Could not list repositories.")
-		return
-	}
-	if !found {
-		b.reply(ctx, chatID, "Repository is not installed.")
-		return
+	var entry repo.Entry
+	if len(args) == 0 {
+		entries, err := repo.List(b.cfg.WorkDir)
+		if err != nil {
+			b.logWarn("list repositories", "error", err)
+			b.reply(ctx, chatID, "Could not list repositories.")
+			return
+		}
+		if len(entries) == 0 {
+			b.reply(ctx, chatID, "No repositories installed.")
+			return
+		}
+		entry = entries[0]
+	} else {
+		found := false
+		var err error
+		entry, found, err = b.installedRepo(args[0])
+		if err != nil {
+			b.logWarn("list repositories", "error", err)
+			b.reply(ctx, chatID, "Could not list repositories.")
+			return
+		}
+		if !found {
+			b.reply(ctx, chatID, "Repository is not installed.")
+			return
+		}
 	}
 
 	wanted := ""
@@ -113,12 +124,12 @@ func (b *Bot) handleShow(ctx context.Context, chatID int64, args []string) {
 		return
 	}
 
-	b.sendDocuments(ctx, chatID, repo.Docs{Files: files})
+	b.sendDocAlbum(ctx, chatID, repo.Docs{Files: files})
 }
 
-// handleLog replies with the tail of the current job log, the newest job log
-// for a repository, or the newest job log overall. The optional argument names
-// a repository, never a path.
+// handleLog replies with a compact card holding the tail of the current job
+// log plus the full .log attachment. The optional argument names a repository,
+// never a path.
 func (b *Bot) handleLog(ctx context.Context, chatID int64, args []string) {
 	if len(args) > 1 {
 		b.reply(ctx, chatID, "Usage: /log [owner/repo|repo-id]")
@@ -164,18 +175,18 @@ func (b *Bot) handleLog(ctx context.Context, chatID int64, args []string) {
 		b.reply(ctx, chatID, "The job log is not available.")
 		return
 	}
-	tail, err := tailFile(path, logCommandLines)
+	tail, err := tailFile(path, maxLogCardLines)
 	if err != nil {
 		b.logWarn("read job log", "job", record.ID, "error", err)
 		b.reply(ctx, chatID, "The job log is not available.")
 		return
 	}
-	if strings.TrimSpace(tail) == "" {
-		b.reply(ctx, chatID, "The job log is empty.")
-		return
-	}
 
-	b.send(ctx, chatID, preBlock(escapeTail(tail, maxMessageUTF16-preOverhead)))
+	b.send(ctx, chatID, logCardHTML(record, tail))
+	b.sendLogFile(ctx, chatID, jobs.Result{
+		Request: jobs.Request{ID: record.ID, ChatID: chatID},
+		LogPath: path,
+	})
 }
 
 // installedRepo resolves a displayed owner/repo or canonical ID against the

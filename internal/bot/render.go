@@ -40,6 +40,87 @@ var (
 	logControl = regexp.MustCompile(`[\x00-\x08\x0b-\x1f\x7f]`)
 )
 
+// statusText renders only the running job and the queue. Settings stay in
+// /model, /runner, and the /help footer so /status remains quiet.
+func statusText(status jobs.Status) string {
+	var lines []string
+	if status.Running != nil {
+		lines = append(lines, runningStatusLine(*status.Running))
+	} else {
+		lines = append(lines, "<b>Idle</b> · <code>no jobs running</code>")
+	}
+
+	if len(status.Queued) > 0 {
+		lines = append(lines, "", "<b>Queued</b>")
+		for i, job := range status.Queued {
+			lines = append(lines, cardLine(fmt.Sprintf("#%d %s", i+1, jobLine(job, false))))
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// runningStatusLine renders the running job header and its compact metadata.
+func runningStatusLine(view jobs.JobView) string {
+	head := "<b>⚡ Running</b> · <code>" + cardEscape(displayRepo(view.RepoID)) + "</code>"
+	meta := make([]string, 0, 3)
+	if view.Model != "" {
+		meta = append(meta, view.Model)
+	}
+	if view.Runner != "" {
+		meta = append(meta, view.Runner)
+	}
+	meta = append(meta, formatDuration(view.Elapsed))
+	return head + "\n" + cardLine(strings.Join(meta, " · "))
+}
+
+// listText renders the installed repositories as a bold header and one
+// monospaced line each, newest first.
+func listText(entries []repo.Entry) string {
+	lines := make([]string, 0, len(entries)+1)
+	lines = append(lines, "<b>Installed</b> · <code>"+repoCountLabel(len(entries))+"</code>")
+	for _, entry := range entries {
+		lines = append(lines, cardLine(fmt.Sprintf("%s · %s · %s",
+			entry.Display,
+			entry.ModTime.Format(listTimeLayout),
+			strings.Join(entry.Docs, ","))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// repoCountLabel renders "1 repo" or "N repos".
+func repoCountLabel(count int) string {
+	if count == 1 {
+		return "1 repo"
+	}
+	return fmt.Sprintf("%d repos", count)
+}
+
+// logCardHTML renders the compact /log card: the job identity and the newest
+// tail lines in a <pre> block. The full .log is attached separately.
+func logCardHTML(record state.JobRecord, tail string) string {
+	lines := []string{cardTitle("Log", displayRepo(record.RepoID))}
+	meta := make([]string, 0, 3)
+	if record.ID != "" {
+		meta = append(meta, record.ID)
+	}
+	if record.Model != "" {
+		meta = append(meta, record.Model)
+	}
+	if record.Runner != "" {
+		meta = append(meta, record.Runner)
+	}
+	if len(meta) > 0 {
+		lines = append(lines, cardLine(strings.Join(meta, " · ")))
+	}
+
+	header := strings.Join(lines, "\n")
+	if strings.TrimSpace(tail) == "" {
+		return header + "\n" + cardField("log is empty")
+	}
+	return appendLogTail(header, tail)
+}
+
 // queuedCardHTML renders the initial card for a job waiting behind others.
 func queuedCardHTML(req jobs.Request, position int) string {
 	return strings.Join([]string{

@@ -420,25 +420,26 @@ func TestIgnoresNonOwnerGroupAndChannel(t *testing.T) {
 	}
 }
 
-func TestStartAndHelpShowModelRunnerAndJob(t *testing.T) {
+func TestHelpIsCompactAndHasSettingsFooter(t *testing.T) {
 	f := newBotFixture(t)
-
-	f.handle(privateUpdate("/start"))
 	f.handle(privateUpdate("/help@ZeroTwoBot"))
 
 	texts := f.sender.messageTexts()
-	if len(texts) != 2 {
-		t.Fatalf("messages = %d, want 2", len(texts))
+	if len(texts) != 1 {
+		t.Fatalf("messages = %d, want 1", len(texts))
 	}
-	for i, text := range texts {
-		for _, want := range []string{
-			"flash", "test/flash", "cli", "idle",
-			"/gist", "/status", "/cancel", "/list", "/show", "/log", "/model", "/runner", "/help",
-		} {
-			if !strings.Contains(text, want) {
-				t.Errorf("message[%d] does not contain %q:\n%s", i, want, text)
-			}
-		}
+	text := texts[0]
+
+	requireNotContains(t, text, "<pre>")
+	requireContains(t, text, "<b>")
+
+	for _, command := range []string{
+		"gist", "status", "cancel", "list", "show", "log", "model", "runner", "help",
+	} {
+		requireContains(t, text, "<code>/"+command)
+	}
+	if got := strings.Count(text, "flash · cli · idle"); got != 1 {
+		t.Errorf("footer appears %d times, want exactly once:\n%s", got, text)
 	}
 
 	repoTarget, err := repo.ParseGitHubURL("https://github.com/example/project")
@@ -456,11 +457,35 @@ func TestStartAndHelpShowModelRunnerAndJob(t *testing.T) {
 	f.handle(privateUpdate("/help"))
 
 	texts = f.sender.messageTexts()
-	if len(texts) != 3 {
-		t.Fatalf("messages = %d, want 3", len(texts))
+	if len(texts) != 2 {
+		t.Fatalf("messages = %d, want 2", len(texts))
 	}
-	requireContains(t, texts[2], "running")
-	requireContains(t, texts[2], "example/project")
+	requireContains(t, texts[1], "flash · cli · running example/project")
+	if got := strings.Count(texts[1], "running example/project"); got != 1 {
+		t.Errorf("job state appears %d times, want once:\n%s", got, texts[1])
+	}
+}
+
+func TestStartIsShortAndFriendly(t *testing.T) {
+	f := newBotFixture(t)
+
+	f.handle(privateUpdate("/start"))
+
+	texts := f.sender.messageTexts()
+	if len(texts) != 1 {
+		t.Fatalf("messages = %d, want 1", len(texts))
+	}
+	text := texts[0]
+
+	requireContains(t, text, "<b>Zero Two</b>")
+	requireContains(t, text, "GitHub")
+	requireContains(t, text, "<code>/gist")
+	requireContains(t, text, "<code>/help")
+	requireContains(t, text, "flash · cli · idle")
+	requireNotContains(t, text, "<pre>")
+	if got := utf16Count(text); got > 600 {
+		t.Errorf("start text = %d UTF-16 units, want a short page", got)
+	}
 }
 
 func TestGistValidEnqueuesWithRunnerAndModel(t *testing.T) {
@@ -647,7 +672,7 @@ func TestGistQueueFullReplies(t *testing.T) {
 	requireNotContains(t, texts[2], "disk unavailable")
 }
 
-func TestStatusShowsElapsedAndQueue(t *testing.T) {
+func TestStatusIsJobAndQueueOnly(t *testing.T) {
 	t.Run("running and queued", func(t *testing.T) {
 		f := newBotFixture(t)
 		f.jobs.status = jobs.Status{
@@ -671,11 +696,15 @@ func TestStatusShowsElapsedAndQueue(t *testing.T) {
 		if len(texts) != 1 {
 			t.Fatalf("messages = %d, want 1", len(texts))
 		}
+		text := texts[0]
 		for _, want := range []string{
-			"<pre>", "example/project", "flash", "cli", "1m30s",
-			"#1", "other/repo", "#2", "third/thing", "pro", "api",
+			"Running", "example/project", "flash", "cli", "1m30s",
+			"Queued", "#1", "other/repo", "#2", "third/thing", "pro", "api",
 		} {
-			requireContains(t, texts[0], want)
+			requireContains(t, text, want)
+		}
+		for _, unwanted := range []string{"Model:", "Runner:", "Free override:", "<pre>"} {
+			requireNotContains(t, text, unwanted)
 		}
 	})
 
@@ -687,7 +716,27 @@ func TestStatusShowsElapsedAndQueue(t *testing.T) {
 		if len(texts) != 1 {
 			t.Fatalf("messages = %d, want 1", len(texts))
 		}
-		requireContains(t, texts[0], "No jobs running")
+		text := texts[0]
+		requireContains(t, text, "no jobs running")
+		requireNotContains(t, text, "Model:")
+		requireNotContains(t, text, "Runner:")
+		requireNotContains(t, text, "<pre>")
+	})
+
+	t.Run("settings are not repeated", func(t *testing.T) {
+		f := newBotFixture(t)
+		f.handle(privateUpdate("/model free test/pro#high"))
+		f.handle(privateUpdate("/runner api"))
+
+		f.handle(privateUpdate("/status"))
+
+		text := f.lastMessage(t)
+		for _, unwanted := range []string{
+			"Model:", "Runner:", "Free override:", "test/pro#high", "api",
+		} {
+			requireNotContains(t, text, unwanted)
+		}
+		requireContains(t, text, "no jobs running")
 	})
 }
 
@@ -1213,6 +1262,27 @@ func TestTailFileStripsANSIAndKeepsLastLines(t *testing.T) {
 
 	if _, err := tailFile(filepath.Join(t.TempDir(), "missing.log"), 5); err == nil {
 		t.Error("tailFile on a missing file returned nil error")
+	}
+}
+
+func TestCommandMenuListsAllCommands(t *testing.T) {
+	menu := CommandMenu()
+	want := []string{"gist", "status", "cancel", "list", "show", "log", "model", "runner", "help"}
+	if len(menu) != len(want) {
+		t.Fatalf("menu entries = %d, want %d", len(menu), len(want))
+	}
+	for i, command := range want {
+		if menu[i].Command != command {
+			t.Errorf("menu[%d] command = %q, want %q", i, menu[i].Command, command)
+		}
+		if strings.TrimSpace(menu[i].Description) == "" {
+			t.Errorf("menu[%d] (%s) has no description", i, menu[i].Command)
+		}
+	}
+
+	menu[0].Command = "changed"
+	if CommandMenu()[0].Command != "gist" {
+		t.Error("CommandMenu returns shared mutable state")
 	}
 }
 
