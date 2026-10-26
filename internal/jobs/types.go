@@ -75,6 +75,15 @@ type Notifier interface {
 	Notify(ctx context.Context, res Result)
 }
 
+// StartNotifier is an optional extension of Notifier. When the manager's
+// Notifier also implements it, NotifyStarted runs once per job after the job is
+// recorded as running and before repository preparation begins. Implementations
+// must be best-effort: a failure to deliver the start event never affects the
+// job.
+type StartNotifier interface {
+	NotifyStarted(ctx context.Context, req Request)
+}
+
 // JobView is a read-only snapshot of a job for /status.
 type JobView struct {
 	ID        string

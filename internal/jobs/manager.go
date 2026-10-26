@@ -351,6 +351,13 @@ func (m *Manager) process(ctx context.Context, job *activeJob) {
 		record.StartedAt = job.startedAt
 	})
 
+	// Optional start hook: the job is already recorded as running, so a
+	// Notifier can edit its queued card in place. It is best-effort and uses
+	// the root context so a cancelled job cannot suppress its start event.
+	if starter, ok := m.notifier.(StartNotifier); ok {
+		starter.NotifyStarted(m.notifyContext(), req)
+	}
+
 	if m.preparer == nil {
 		m.finish(res, state.StatusFailed, errors.New("jobs: repository preparer is not configured"), repo.Docs{})
 		return

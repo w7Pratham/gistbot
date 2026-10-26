@@ -70,12 +70,21 @@ type managerFixture struct {
 	cli     *fakeRunner
 	api     *fakeRunner
 	notify  *fakeNotifier
-	mgr     *Manager
-	ctx     context.Context
-	cancel  context.CancelFunc
+
+	// notifier is what the manager receives; tests can replace it with a
+	// notifier that also implements StartNotifier.
+	notifier Notifier
+
+	mgr    *Manager
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-func newManagerFixture(t *testing.T, mutate func(*config.Config)) *managerFixture {
+// fixtureOption adjusts the fakes a fixture hands to the manager before the
+// manager is constructed.
+type fixtureOption func(*managerFixture)
+
+func newManagerFixture(t *testing.T, mutate func(*config.Config), opts ...fixtureOption) *managerFixture {
 	t.Helper()
 
 	root := t.TempDir()
@@ -97,6 +106,7 @@ func newManagerFixture(t *testing.T, mutate func(*config.Config)) *managerFixtur
 	f.cli = &fakeRunner{kind: RunnerCLI}
 	f.api = &fakeRunner{kind: RunnerAPI}
 	f.notify = newFakeNotifier()
+	f.notifier = f.notify
 
 	f.cfg = config.Config{
 		WorkDir:       f.workDir,
@@ -108,12 +118,15 @@ func newManagerFixture(t *testing.T, mutate func(*config.Config)) *managerFixtur
 	if mutate != nil {
 		mutate(&f.cfg)
 	}
+	for _, opt := range opts {
+		opt(f)
+	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	f.mgr = NewManager(f.cfg, f.store, f.prep, map[RunnerKind]Runner{
 		RunnerCLI: f.cli,
 		RunnerAPI: f.api,
-	}, f.notify, logger)
+	}, f.notifier, logger)
 
 	f.ctx, f.cancel = context.WithCancel(context.Background())
 	t.Cleanup(func() {
@@ -376,6 +389,74 @@ func (n *fakeNotifier) wait(t *testing.T) notification {
 
 func (n *fakeNotifier) pending() int {
 	return len(n.ch)
+}
+
+// startNotification is one observed NotifyStarted call together with the
+// manager state visible at that moment.
+type startNotification struct {
+	ctx      context.Context
+	req      Request
+	status   state.JobStatus
+	prepares int
+}
+
+// fakeStartNotifier implements both Notifier and StartNotifier. It captures the
+// persisted job status and the number of Prepare calls at the moment the start
+// hook fires, which lets the tests prove the hook's ordering.
+type fakeStartNotifier struct {
+	*fakeNotifier
+
+	store *state.Store
+	prep  *fakePreparer
+
+	mu    sync.Mutex
+	calls []startNotification
+}
+
+func newFakeStartNotifier() *fakeStartNotifier {
+	return &fakeStartNotifier{fakeNotifier: newFakeNotifier()}
+}
+
+func withStartNotifier(n *fakeStartNotifier) fixtureOption {
+	return func(f *managerFixture) {
+		n.store = f.store
+		n.prep = f.prep
+		f.notifier = n
+		f.notify = n.fakeNotifier
+	}
+}
+
+func (n *fakeStartNotifier) NotifyStarted(ctx context.Context, req Request) {
+	var status state.JobStatus
+	if n.store != nil {
+		for _, job := range n.store.Snapshot().Jobs {
+			if job.ID == req.ID {
+				status = job.Status
+				break
+			}
+		}
+	}
+
+	prepares := 0
+	if n.prep != nil {
+		all, _, _, _ := n.prep.snapshot()
+		prepares = len(all)
+	}
+
+	n.mu.Lock()
+	n.calls = append(n.calls, startNotification{
+		ctx:      ctx,
+		req:      req,
+		status:   status,
+		prepares: prepares,
+	})
+	n.mu.Unlock()
+}
+
+func (n *fakeStartNotifier) started() []startNotification {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]startNotification(nil), n.calls...)
 }
 
 // blockUntilCancelled is the run body for a job that must be stopped by the
@@ -1055,5 +1136,81 @@ func TestManagerStopCancelsCurrentAndDrainsQueue(t *testing.T) {
 
 	if _, err := f.mgr.Enqueue(testRequest(testJobD, RunnerCLI)); !errors.Is(err, ErrManagerStopped) {
 		t.Errorf("Enqueue after Stop error = %v, want ErrManagerStopped", err)
+	}
+}
+
+func TestManagerNotifiesStartedBeforePrepare(t *testing.T) {
+	start := newFakeStartNotifier()
+	f := newManagerFixture(t, nil, withStartNotifier(start))
+	f.start()
+
+	f.enqueue(testRequest(testJobA, RunnerCLI))
+	res := f.notify.wait(t).res
+	if res.Status != state.StatusSucceeded {
+		t.Fatalf("Result.Status = %q, want %q (err %v)", res.Status, state.StatusSucceeded, res.Err)
+	}
+
+	calls := start.started()
+	if len(calls) != 1 {
+		t.Fatalf("NotifyStarted calls = %d, want 1", len(calls))
+	}
+	got := calls[0]
+
+	if got.req.ID != testJobA {
+		t.Errorf("NotifyStarted request ID = %q, want %q", got.req.ID, testJobA)
+	}
+	if got.req.Target.ID != testTarget.ID {
+		t.Errorf("NotifyStarted target ID = %q, want %q", got.req.Target.ID, testTarget.ID)
+	}
+	if got.req.ChatID != 42 {
+		t.Errorf("NotifyStarted chat ID = %d, want 42", got.req.ChatID)
+	}
+	if got.req.RunDir != "" || got.req.Prompt != "" {
+		t.Errorf("NotifyStarted saw a prepared request: RunDir=%q Prompt=%q", got.req.RunDir, got.req.Prompt)
+	}
+	if got.status != state.StatusRunning {
+		t.Errorf("state at NotifyStarted = %q, want %q", got.status, state.StatusRunning)
+	}
+	if got.prepares != 0 {
+		t.Errorf("Prepare calls before NotifyStarted = %d, want 0", got.prepares)
+	}
+	if got.ctx.Err() != nil {
+		t.Errorf("NotifyStarted context already ended: %v", got.ctx.Err())
+	}
+	if _, hasDeadline := got.ctx.Deadline(); hasDeadline {
+		t.Error("NotifyStarted received the job context, want the manager root context")
+	}
+
+	prepares, installs, _, _ := f.prep.snapshot()
+	if len(prepares) != 1 || prepares[0] != testJobA {
+		t.Errorf("prepares = %v, want [%s]", prepares, testJobA)
+	}
+	if len(installs) != 1 || installs[0].ID != testTarget.ID {
+		t.Errorf("installs = %+v, want one install of %s", installs, testTarget.ID)
+	}
+}
+
+func TestManagerWithoutStartNotifierStillRuns(t *testing.T) {
+	f := newManagerFixture(t, nil)
+	if _, ok := any(f.notifier).(StartNotifier); ok {
+		t.Fatal("the Notify-only fake implements StartNotifier; this test would not cover the optional hook")
+	}
+	f.start()
+
+	f.enqueue(testRequest(testJobA, RunnerCLI))
+	res := f.notify.wait(t).res
+	if res.Status != state.StatusSucceeded {
+		t.Fatalf("Result.Status = %q, want %q (err %v)", res.Status, state.StatusSucceeded, res.Err)
+	}
+
+	prepares, installs, _, _ := f.prep.snapshot()
+	if len(prepares) != 1 || prepares[0] != testJobA {
+		t.Errorf("prepares = %v, want [%s]", prepares, testJobA)
+	}
+	if len(installs) != 1 || installs[0].ID != testTarget.ID {
+		t.Errorf("installs = %+v, want one install of %s", installs, testTarget.ID)
+	}
+	if record := f.jobRecord(testJobA); record.Status != state.StatusSucceeded {
+		t.Errorf("state status = %q, want %q", record.Status, state.StatusSucceeded)
 	}
 }
