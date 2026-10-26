@@ -28,3 +28,17 @@ type Update struct {
 	UpdateID int64    `json:"update_id"`
 	Message  *Message `json:"message"`
 }
+
+// BotCommand is one entry in the bot's command menu.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// Document is one file in a media group. Caption is optional and must already
+// be HTML-escaped by the caller.
+type Document struct {
+	Filename string
+	Data     []byte
+	Caption  string
+}

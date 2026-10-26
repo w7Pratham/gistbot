@@ -3,12 +3,14 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -668,4 +670,418 @@ func Test429UsesRetryAfterHeaderWhenBodyHasNoParameters(t *testing.T) {
 	if len(slept) != 1 || slept[0] != 4*time.Second {
 		t.Errorf("sleep calls = %v, want [4s]", slept)
 	}
+}
+
+func TestSendMessageIDReturnsMessageID(t *testing.T) {
+	var (
+		gotPath string
+		gotForm url.Values
+	)
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse sendMessage form: %v", err)
+		}
+		gotForm = r.PostForm
+		respond(w, http.StatusOK, `{"ok":true,"result":{"message_id":77}}`)
+	}))
+
+	const html = "card <b>text</b>"
+	messageID, err := client.SendMessageID(testContext(t), 1234, html)
+	if err != nil {
+		t.Fatalf("SendMessageID returned an error: %v", err)
+	}
+	if messageID != 77 {
+		t.Errorf("message ID = %d, want 77", messageID)
+	}
+	if want := "/bot" + testToken + "/sendMessage"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if got := gotForm.Get("chat_id"); got != "1234" {
+		t.Errorf("chat_id = %q, want %q", got, "1234")
+	}
+	if got := gotForm.Get("text"); got != html {
+		t.Errorf("text = %q, want the HTML body unchanged", got)
+	}
+	if got := gotForm.Get("parse_mode"); got != "HTML" {
+		t.Errorf("parse_mode = %q, want %q", got, "HTML")
+	}
+}
+
+func TestSendMessageStillReturnsErrorOnly(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+
+		if call == 1 {
+			respond(w, http.StatusOK, `{"ok":true,"result":{"message_id":88}}`)
+			return
+		}
+		respond(w, http.StatusBadRequest, `{"ok":false,"error_code":400,"description":"Bad Request: message is too long"}`)
+	}))
+
+	// Pin the existing error-only signature while SendMessage delegates to
+	// SendMessageID internally.
+	var send func(context.Context, int64, string) error = client.SendMessage
+	if err := send(testContext(t), 7, "hello"); err != nil {
+		t.Fatalf("SendMessage returned an error for a successful send: %v", err)
+	}
+
+	err := send(testContext(t), 7, "hello")
+	if err == nil {
+		t.Fatal("SendMessage returned nil for an API error")
+	}
+	message := err.Error()
+	if !strings.HasPrefix(message, "telegram sendMessage: ") {
+		t.Errorf("error %q lacks the sendMessage prefix", message)
+	}
+	if !strings.Contains(message, "400") || !strings.Contains(message, "message is too long") {
+		t.Errorf("error %q does not describe the API failure", message)
+	}
+}
+
+func TestEditMessageTextSendsChatMessageAndHTML(t *testing.T) {
+	var (
+		gotPath string
+		gotForm url.Values
+	)
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse editMessageText form: %v", err)
+		}
+		gotForm = r.PostForm
+		respond(w, http.StatusOK, `{"ok":true,"result":true}`)
+	}))
+
+	if err := client.EditMessageText(testContext(t), -100123, 456, "<b>Running</b>"); err != nil {
+		t.Fatalf("EditMessageText returned an error: %v", err)
+	}
+	if want := "/bot" + testToken + "/editMessageText"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if got := gotForm.Get("chat_id"); got != "-100123" {
+		t.Errorf("chat_id = %q, want %q", got, "-100123")
+	}
+	if got := gotForm.Get("message_id"); got != "456" {
+		t.Errorf("message_id = %q, want %q", got, "456")
+	}
+	if got := gotForm.Get("text"); got != "<b>Running</b>" {
+		t.Errorf("text = %q, want the HTML body unchanged", got)
+	}
+	if got := gotForm.Get("parse_mode"); got != "HTML" {
+		t.Errorf("parse_mode = %q, want %q", got, "HTML")
+	}
+}
+
+func TestEditMessageTextRejectsTooLong(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		requests int
+	)
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		respond(w, http.StatusOK, `{"ok":true,"result":true}`)
+	}))
+
+	tooLong := strings.Repeat("a", maxMessageUTF16+1)
+	err := client.EditMessageText(testContext(t), 1, 2, tooLong)
+	if err == nil {
+		t.Fatal("EditMessageText accepted a message over the UTF-16 limit")
+	}
+	if !errors.Is(err, ErrMessageTooLong) {
+		t.Errorf("error = %v, want ErrMessageTooLong", err)
+	}
+	if !strings.HasPrefix(err.Error(), "telegram editMessageText: ") {
+		t.Errorf("error %q lacks the editMessageText prefix", err.Error())
+	}
+
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+	if got != 0 {
+		t.Errorf("too-long edit caused %d HTTP request(s), want 0", got)
+	}
+}
+
+func TestSendMediaGroupBuildsDocumentsAndFiles(t *testing.T) {
+	type mediaEntry struct {
+		Type    string `json:"type"`
+		Media   string `json:"media"`
+		Caption string `json:"caption"`
+	}
+
+	docs := []Document{
+		{Filename: "codemap.md", Data: []byte("first document"), Caption: "<b>Code map</b>"},
+		{Filename: "routing.md", Data: []byte{0x00, 0x01, 0xff, 'x'}},
+	}
+
+	var (
+		gotPath        string
+		gotContentType string
+		gotChatID      string
+		gotParseMode   string
+		gotMedia       []mediaEntry
+		gotFilenames   = map[string]string{}
+		gotFiles       = map[string][]byte{}
+	)
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("parse multipart form: %v", err)
+			respond(w, http.StatusInternalServerError, `{"ok":false,"error_code":500,"description":"bad multipart"}`)
+			return
+		}
+		gotChatID = r.FormValue("chat_id")
+		gotParseMode = r.FormValue("parse_mode")
+		if err := json.Unmarshal([]byte(r.FormValue("media")), &gotMedia); err != nil {
+			t.Errorf("decode media field: %v", err)
+		}
+		for _, field := range []string{"file0", "file1"} {
+			files := r.MultipartForm.File[field]
+			if len(files) != 1 {
+				t.Errorf("%s parts = %d, want 1", field, len(files))
+				continue
+			}
+			gotFilenames[field] = files[0].Filename
+			file, err := files[0].Open()
+			if err != nil {
+				t.Errorf("open %s: %v", field, err)
+				continue
+			}
+			data, readErr := io.ReadAll(file)
+			_ = file.Close()
+			if readErr != nil {
+				t.Errorf("read %s: %v", field, readErr)
+				continue
+			}
+			gotFiles[field] = data
+		}
+		respond(w, http.StatusOK, `{"ok":true,"result":[]}`)
+	}))
+
+	if err := client.SendMediaGroup(testContext(t), -1001, docs); err != nil {
+		t.Fatalf("SendMediaGroup returned an error: %v", err)
+	}
+
+	if want := "/bot" + testToken + "/sendMediaGroup"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	mediaType, _, err := mime.ParseMediaType(gotContentType)
+	if err != nil {
+		t.Fatalf("parse content type %q: %v", gotContentType, err)
+	}
+	if mediaType != "multipart/form-data" {
+		t.Errorf("media type = %q, want multipart/form-data", mediaType)
+	}
+	if gotChatID != "-1001" {
+		t.Errorf("chat_id = %q, want %q", gotChatID, "-1001")
+	}
+	if gotParseMode != "HTML" {
+		t.Errorf("parse_mode = %q, want %q", gotParseMode, "HTML")
+	}
+
+	wantMedia := []mediaEntry{
+		{Type: "document", Media: "attach://file0", Caption: "<b>Code map</b>"},
+		{Type: "document", Media: "attach://file1"},
+	}
+	if len(gotMedia) != len(wantMedia) {
+		t.Fatalf("media entries = %d, want %d", len(gotMedia), len(wantMedia))
+	}
+	for i, want := range wantMedia {
+		if gotMedia[i] != want {
+			t.Errorf("media[%d] = %+v, want %+v", i, gotMedia[i], want)
+		}
+	}
+
+	for i, doc := range docs {
+		field := "file" + strconv.Itoa(i)
+		if got := gotFilenames[field]; got != doc.Filename {
+			t.Errorf("%s filename = %q, want %q", field, got, doc.Filename)
+		}
+		if !bytes.Equal(gotFiles[field], doc.Data) {
+			t.Errorf("%s bytes = %v, want %v", field, gotFiles[field], doc.Data)
+		}
+	}
+}
+
+func TestSendMediaGroupRequiresTwoToTen(t *testing.T) {
+	makeDocs := func(n int) []Document {
+		docs := make([]Document, n)
+		for i := range docs {
+			docs[i] = Document{Filename: "doc.md", Data: []byte("x")}
+		}
+		return docs
+	}
+
+	tests := []struct {
+		name string
+		docs []Document
+	}{
+		{name: "none", docs: nil},
+		{name: "one", docs: makeDocs(1)},
+		{name: "eleven", docs: makeDocs(11)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				mu       sync.Mutex
+				requests int
+			)
+			client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				requests++
+				mu.Unlock()
+				respond(w, http.StatusOK, `{"ok":true,"result":[]}`)
+			}))
+
+			err := client.SendMediaGroup(testContext(t), 1, tt.docs)
+			if err == nil {
+				t.Fatal("SendMediaGroup accepted an invalid document count")
+			}
+			if !strings.HasPrefix(err.Error(), "telegram sendMediaGroup: ") {
+				t.Errorf("error %q lacks the sendMediaGroup prefix", err.Error())
+			}
+			if !strings.Contains(err.Error(), "2 to 10 documents") {
+				t.Errorf("error %q does not describe the document count bounds", err.Error())
+			}
+
+			mu.Lock()
+			got := requests
+			mu.Unlock()
+			if got != 0 {
+				t.Errorf("invalid document count caused %d HTTP request(s), want 0", got)
+			}
+		})
+	}
+}
+
+func TestSendMediaGroupRetries429(t *testing.T) {
+	var (
+		mu           sync.Mutex
+		bodies       [][]byte
+		contentTypes []string
+		slept        []time.Duration
+	)
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read media group body: %v", err)
+		}
+
+		mu.Lock()
+		bodies = append(bodies, body)
+		contentTypes = append(contentTypes, r.Header.Get("Content-Type"))
+		call := len(bodies)
+		mu.Unlock()
+
+		if call == 1 {
+			respond(w, http.StatusTooManyRequests, `{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`)
+			return
+		}
+		respond(w, http.StatusOK, `{"ok":true,"result":[]}`)
+	}), WithSleep(func(ctx context.Context, d time.Duration) error {
+		mu.Lock()
+		defer mu.Unlock()
+		slept = append(slept, d)
+		return nil
+	}))
+
+	docs := []Document{
+		{Filename: "a.md", Data: []byte("alpha")},
+		{Filename: "b.md", Data: []byte("beta")},
+	}
+	if err := client.SendMediaGroup(testContext(t), 1, docs); err != nil {
+		t.Fatalf("SendMediaGroup returned an error after retry: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2", len(bodies))
+	}
+	if len(bodies[0]) == 0 {
+		t.Fatal("first media group body is empty")
+	}
+	if !bytes.Equal(bodies[0], bodies[1]) {
+		t.Error("429 retry did not replay the exact multipart body")
+	}
+	if contentTypes[0] != contentTypes[1] {
+		t.Errorf("retry content type = %q, want %q", contentTypes[1], contentTypes[0])
+	}
+	if len(slept) != 1 || slept[0] != time.Second {
+		t.Errorf("sleep calls = %v, want [1s]", slept)
+	}
+}
+
+func TestSetMyCommandsSendsJSONCommands(t *testing.T) {
+	var (
+		gotPath        string
+		gotContentType string
+		gotForm        url.Values
+	)
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse setMyCommands form: %v", err)
+		}
+		gotForm = r.PostForm
+		respond(w, http.StatusOK, `{"ok":true,"result":true}`)
+	}))
+
+	commands := []BotCommand{
+		{Command: "gist", Description: "Start a job"},
+		{Command: "help", Description: "Show help"},
+	}
+	if err := client.SetMyCommands(testContext(t), commands); err != nil {
+		t.Fatalf("SetMyCommands returned an error: %v", err)
+	}
+
+	if want := "/bot" + testToken + "/setMyCommands"; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	mediaType, _, err := mime.ParseMediaType(gotContentType)
+	if err != nil {
+		t.Fatalf("parse content type %q: %v", gotContentType, err)
+	}
+	if mediaType != formContentType {
+		t.Errorf("media type = %q, want %q", mediaType, formContentType)
+	}
+
+	raw := gotForm.Get("commands")
+	var decoded []struct {
+		Command     string `json:"command"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("decode commands value %q: %v", raw, err)
+	}
+	if len(decoded) != len(commands) {
+		t.Fatalf("commands = %d, want %d", len(decoded), len(commands))
+	}
+	for i, want := range commands {
+		if decoded[i].Command != want.Command || decoded[i].Description != want.Description {
+			t.Errorf("commands[%d] = %+v, want %+v", i, decoded[i], want)
+		}
+	}
+
+	t.Run("api error is sanitized", func(t *testing.T) {
+		errorClient, baseURL := newTestServerClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			respond(w, http.StatusUnauthorized, `{"ok":false,"error_code":401,"description":"Unauthorized: bot`+testToken+` rejected"}`)
+		}))
+
+		err := errorClient.SetMyCommands(testContext(t), commands)
+		assertSanitizedError(t, err, "setMyCommands", baseURL)
+	})
 }

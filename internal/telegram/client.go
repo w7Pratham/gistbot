@@ -29,23 +29,30 @@ const (
 	redacted       = "<redacted>"
 	redactedURL    = "<base-url>"
 
-	methodDeleteWebhook = "deleteWebhook"
-	methodGetUpdates    = "getUpdates"
-	methodSendMessage   = "sendMessage"
-	methodSendDocument  = "sendDocument"
-	formContentType     = "application/x-www-form-urlencoded"
-	defaultPollTimeout  = 30 * time.Second
-	longPollGrace       = 10 * time.Second
-	sendTimeout         = 15 * time.Second
-	maxRetries          = 3
-	maxResponseBytes    = 10 << 20
-	maxMessageUTF16     = 4096
-	truncationEllipsis  = "…"
-	fieldAllowedUpdates = "allowed_updates"
-	onlyMessageUpdates  = `["message"]`
-	fieldParseMode      = "parse_mode"
-	parseModeHTML       = "HTML"
-	fieldDocument       = "document"
+	methodDeleteWebhook   = "deleteWebhook"
+	methodGetUpdates      = "getUpdates"
+	methodSendMessage     = "sendMessage"
+	methodSendDocument    = "sendDocument"
+	methodEditMessageText = "editMessageText"
+	methodSendMediaGroup  = "sendMediaGroup"
+	methodSetMyCommands   = "setMyCommands"
+	formContentType       = "application/x-www-form-urlencoded"
+	defaultPollTimeout    = 30 * time.Second
+	longPollGrace         = 10 * time.Second
+	sendTimeout           = 15 * time.Second
+	maxRetries            = 3
+	maxResponseBytes      = 10 << 20
+	maxMessageUTF16       = 4096
+	truncationEllipsis    = "…"
+	minMediaGroupDocs     = 2
+	maxMediaGroupDocs     = 10
+	fieldAllowedUpdates   = "allowed_updates"
+	onlyMessageUpdates    = `["message"]`
+	fieldParseMode        = "parse_mode"
+	parseModeHTML         = "HTML"
+	fieldDocument         = "document"
+	fieldMedia            = "media"
+	fieldCommands         = "commands"
 )
 
 // ErrMessageTooLong reports that an HTML message exceeds Telegram's 4,096
@@ -154,12 +161,21 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout time.Dura
 	return updates, nil
 }
 
-// SendMessage sends an HTML-formatted message. The text is not escaped or
+// SendMessage sends an HTML-formatted message and discards its message ID. The
+// text is not escaped or truncated here: callers must pass output from
+// EscapeAndTruncate and keep it within 4,096 UTF-16 code units.
+func (c *Client) SendMessage(ctx context.Context, chatID int64, html string) error {
+	_, err := c.SendMessageID(ctx, chatID, html)
+	return err
+}
+
+// SendMessageID sends an HTML-formatted message and returns its Telegram
+// message ID so callers can edit it in place later. The text is not escaped or
 // truncated here: callers must pass output from EscapeAndTruncate and keep it
 // within 4,096 UTF-16 code units.
-func (c *Client) SendMessage(ctx context.Context, chatID int64, html string) error {
+func (c *Client) SendMessageID(ctx context.Context, chatID int64, html string) (int64, error) {
 	if utf16Len(html) > maxMessageUTF16 {
-		return c.wrap(methodSendMessage, ErrMessageTooLong)
+		return 0, c.wrap(methodSendMessage, ErrMessageTooLong)
 	}
 
 	form := url.Values{
@@ -168,7 +184,39 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, html string) err
 		fieldParseMode: {parseModeHTML},
 	}
 
-	_, err := c.do(ctx, methodSendMessage, formContentType, formBody(form), 0)
+	raw, err := c.do(ctx, methodSendMessage, formContentType, formBody(form), 0)
+	if err != nil {
+		return 0, err
+	}
+
+	var result struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return 0, c.wrap(methodSendMessage, fmt.Errorf("decode result: %w", err))
+	}
+	if result.MessageID <= 0 {
+		return 0, c.wrap(methodSendMessage, errors.New("decode result: missing message_id"))
+	}
+	return result.MessageID, nil
+}
+
+// EditMessageText replaces the text of a message the bot sent. The text is not
+// escaped or truncated here: callers must pass output from EscapeAndTruncate
+// and keep it within 4,096 UTF-16 code units.
+func (c *Client) EditMessageText(ctx context.Context, chatID, messageID int64, html string) error {
+	if utf16Len(html) > maxMessageUTF16 {
+		return c.wrap(methodEditMessageText, ErrMessageTooLong)
+	}
+
+	form := url.Values{
+		"chat_id":      {strconv.FormatInt(chatID, 10)},
+		"message_id":   {strconv.FormatInt(messageID, 10)},
+		"text":         {html},
+		fieldParseMode: {parseModeHTML},
+	}
+
+	_, err := c.do(ctx, methodEditMessageText, formContentType, formBody(form), 0)
 	return err
 }
 
@@ -198,6 +246,79 @@ func (c *Client) SendDocument(ctx context.Context, chatID int64, filename string
 	_, err = c.do(ctx, methodSendDocument, contentType, func() io.Reader {
 		return bytes.NewReader(body)
 	}, 0)
+	return err
+}
+
+// SendMediaGroup uploads two to ten documents as one album. Captions are not
+// escaped here: callers must pass output from EscapeAndTruncate. The same
+// HTML parse mode applies to every caption in the group.
+func (c *Client) SendMediaGroup(ctx context.Context, chatID int64, docs []Document) error {
+	if len(docs) < minMediaGroupDocs || len(docs) > maxMediaGroupDocs {
+		return c.wrap(methodSendMediaGroup, fmt.Errorf("requires 2 to 10 documents, got %d", len(docs)))
+	}
+
+	items := make([]mediaGroupItem, len(docs))
+	for i, doc := range docs {
+		items[i] = mediaGroupItem{
+			Type:    "document",
+			Media:   "attach://file" + strconv.Itoa(i),
+			Caption: doc.Caption,
+		}
+	}
+	media, err := json.Marshal(items)
+	if err != nil {
+		return c.wrap(methodSendMediaGroup, fmt.Errorf("encode media: %w", err))
+	}
+
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+
+	if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
+		return c.wrap(methodSendMediaGroup, fmt.Errorf("build multipart body: %w", err))
+	}
+	if err := writer.WriteField(fieldParseMode, parseModeHTML); err != nil {
+		return c.wrap(methodSendMediaGroup, fmt.Errorf("build multipart parse mode: %w", err))
+	}
+	if err := writer.WriteField(fieldMedia, string(media)); err != nil {
+		return c.wrap(methodSendMediaGroup, fmt.Errorf("build multipart media: %w", err))
+	}
+	for i, doc := range docs {
+		part, err := writer.CreateFormFile("file"+strconv.Itoa(i), doc.Filename)
+		if err != nil {
+			_ = writer.Close()
+			return c.wrap(methodSendMediaGroup, fmt.Errorf("build multipart file %d: %w", i, err))
+		}
+		if _, err := part.Write(doc.Data); err != nil {
+			_ = writer.Close()
+			return c.wrap(methodSendMediaGroup, fmt.Errorf("write multipart file %d: %w", i, err))
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return c.wrap(methodSendMediaGroup, fmt.Errorf("close multipart body: %w", err))
+	}
+
+	// Build the multipart body once so a 429 retry replays the exact bytes.
+	body := buffer.Bytes()
+	contentType := writer.FormDataContentType()
+	_, err = c.do(ctx, methodSendMediaGroup, contentType, func() io.Reader {
+		return bytes.NewReader(body)
+	}, 0)
+	return err
+}
+
+// SetMyCommands replaces the bot's command menu. An empty list clears it.
+func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	if commands == nil {
+		commands = []BotCommand{}
+	}
+
+	encoded, err := json.Marshal(commands)
+	if err != nil {
+		return c.wrap(methodSetMyCommands, fmt.Errorf("encode commands: %w", err))
+	}
+
+	form := url.Values{fieldCommands: {string(encoded)}}
+	_, err = c.do(ctx, methodSetMyCommands, formContentType, formBody(form), 0)
 	return err
 }
 
@@ -246,6 +367,13 @@ type apiEnvelope struct {
 
 type apiParameters struct {
 	RetryAfter int `json:"retry_after"`
+}
+
+// mediaGroupItem is one entry in the sendMediaGroup media JSON array.
+type mediaGroupItem struct {
+	Type    string `json:"type"`
+	Media   string `json:"media"`
+	Caption string `json:"caption,omitempty"`
 }
 
 // formBody rebuilds an encoded form for every attempt so 429 retries can
