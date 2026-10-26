@@ -39,10 +39,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, cfg, logger); err != nil {
-		logger.Error("gistbot stopped with an error", "error", err)
+	if err := runAndLog(ctx, cfg, logger); err != nil {
 		os.Exit(1)
 	}
+}
+
+// runAndLog runs the bot and records any failure with the supplied logger.
+// main and the failure-path tests share this path so secret redaction on
+// startup errors is exercised exactly as it is in production.
+func runAndLog(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if err := run(ctx, cfg, logger); err != nil {
+		logger.Error("gistbot stopped with an error", "error", err)
+		return err
+	}
+	return nil
 }
 
 // run wires and runs the bot until ctx is cancelled. It receives an

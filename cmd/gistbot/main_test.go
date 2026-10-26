@@ -43,6 +43,49 @@ func TestRunDeletesWebhookAndPolls(t *testing.T) {
 	handle.stop(t)
 }
 
+func TestRunDeleteWebhookErrorDoesNotLogSecrets(t *testing.T) {
+	fake := newFakeTelegram(t)
+	fake.failDeleteWebhook(http.StatusUnauthorized, "Unauthorized: bot "+testToken+" rejected")
+	env := newTestEnv(t, fake.server.URL)
+
+	logs := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	err := runAndLog(context.Background(), env.cfg, logger)
+	if err == nil {
+		t.Fatal("run succeeded despite a deleteWebhook error")
+	}
+	if !strings.Contains(err.Error(), "delete telegram webhook") {
+		t.Errorf("error %q does not identify the webhook step", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Error("returned error contains the Telegram token")
+	}
+	if strings.Contains(err.Error(), testAPIPassword) {
+		t.Error("returned error contains the OpenCode API password")
+	}
+
+	logged := logs.String()
+	if logged == "" {
+		t.Fatal("the startup error was not logged")
+	}
+	if strings.Contains(logged, testToken) {
+		t.Error("log output contains the Telegram token")
+	}
+	if strings.Contains(logged, testAPIPassword) {
+		t.Error("log output contains the OpenCode API password")
+	}
+	if !strings.Contains(logged, "<redacted>") {
+		t.Error("log output does not show the redaction marker")
+	}
+
+	if got := fake.deleteCount(); got == 0 {
+		t.Error("deleteWebhook was not attempted")
+	}
+	if fake.hasPollOffset(0) {
+		t.Error("run started polling after deleteWebhook failed")
+	}
+}
+
 func TestRunOwnerGistEndToEnd(t *testing.T) {
 	fake := newFakeTelegram(t, ownerUpdate(1, "/gist https://github.com/owner/repo"))
 	env := newTestEnv(t, fake.server.URL)
@@ -407,6 +450,8 @@ type fakeTelegram struct {
 
 	mu          sync.Mutex
 	deleteCalls int
+	deleteCode  int
+	deleteDesc  string
 	pollOffsets []int64
 	messages    []sentMessage
 	documents   []sentDocument
@@ -429,6 +474,15 @@ func newFakeTelegram(t *testing.T, updates ...telegram.Update) *fakeTelegram {
 	return fake
 }
 
+// failDeleteWebhook makes the next deleteWebhook calls return a Bot API style
+// error. description is included verbatim so a test can prove redaction.
+func (f *fakeTelegram) failDeleteWebhook(code int, description string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleteCode = code
+	f.deleteDesc = description
+}
+
 func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	prefix := "/bot" + f.token + "/"
 	if !strings.HasPrefix(r.URL.Path, prefix) {
@@ -440,7 +494,15 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "deleteWebhook":
 		f.mu.Lock()
 		f.deleteCalls++
+		code, description := f.deleteCode, f.deleteDesc
 		f.mu.Unlock()
+		if code != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			_, _ = io.WriteString(w,
+				fmt.Sprintf(`{"ok":false,"error_code":%d,"description":%q}`, code, description))
+			return
+		}
 		writeTelegramResult(w, "true")
 
 	case "getUpdates":
