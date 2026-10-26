@@ -36,6 +36,10 @@ var (
 	controlChars = regexp.MustCompile(`[\x00-\x08\x0b-\x1f\x7f]`)
 )
 
+// errRunnerBusy rejects a second concurrent Run. It is unexported so tests can
+// match it without committing to the message.
+var errRunnerBusy = errors.New("jobs: CLI runner is already running a job")
+
 // CLIRunner executes a job with `opencode run --standalone` in its own process
 // group so that cancellation also stops the private server OpenCode spawns.
 // A CLIRunner runs one job at a time and is safe to call Cancel concurrently
@@ -48,9 +52,11 @@ type CLIRunner struct {
 	grace time.Duration
 
 	mu              sync.Mutex
+	running         bool
 	cmd             *exec.Cmd
 	pgid            int
 	done            chan struct{}
+	cancelCh        chan struct{}
 	cancelRequested bool
 }
 
@@ -72,25 +78,39 @@ func (r *CLIRunner) Run(ctx context.Context, req Request, logPath string) (RunRe
 		return RunResult{ExitCode: -1}, err
 	}
 
+	// Reserve the runner before any child can start. A second concurrent Run
+	// is rejected here, so it can never race on cmd/pgid.
+	r.mu.Lock()
+	if r.running {
+		r.mu.Unlock()
+		return RunResult{ExitCode: -1}, errRunnerBusy
+	}
+	r.running = true
+	r.cancelRequested = false
+	cancelCh := make(chan struct{})
+	r.cancelCh = cancelCh
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		r.running = false
+		r.cmd = nil
+		r.pgid = 0
+		r.done = nil
+		r.cancelCh = nil
+		r.cancelRequested = false
+		r.mu.Unlock()
+	}()
+
+	if ctx.Err() != nil {
+		return RunResult{ExitCode: -1}, contextFailure(ctx)
+	}
+
 	logFile, err := openJobLog(logPath)
 	if err != nil {
 		return RunResult{ExitCode: -1}, err
 	}
 	defer logFile.Close()
-
-	r.mu.Lock()
-	busy := r.cmd != nil
-	if !busy {
-		r.cancelRequested = false
-	}
-	r.mu.Unlock()
-	if busy {
-		return RunResult{ExitCode: -1}, errors.New("jobs: CLI runner is already running a job")
-	}
-
-	if ctx.Err() != nil {
-		return RunResult{ExitCode: -1}, contextFailure(ctx)
-	}
 
 	// The argv is fixed; no user-supplied string ever reaches a shell.
 	args := []string{
@@ -147,29 +167,18 @@ func (r *CLIRunner) Run(ctx context.Context, req Request, logPath string) (RunRe
 	r.cmd = cmd
 	r.pgid = pgid
 	r.done = done
-	cancelledBefore := r.cancelRequested
 	r.mu.Unlock()
-
-	defer func() {
-		r.mu.Lock()
-		r.cmd = nil
-		r.pgid = 0
-		r.done = nil
-		r.cancelRequested = false
-		r.mu.Unlock()
-	}()
 
 	var waitErr error
 	waited := false
-	if !cancelledBefore {
-		select {
-		case waitErr = <-waitCh:
-			waited = true
-		case <-ctx.Done():
-		}
+	select {
+	case waitErr = <-waitCh:
+		waited = true
+	case <-ctx.Done():
+	case <-cancelCh:
 	}
 
-	if cancelledBefore || r.cancelWasRequested() || ctx.Err() != nil {
+	if r.cancelWasRequested() || ctx.Err() != nil {
 		// The job was cancelled or timed out. TERM the whole group, escalate
 		// to KILL after the grace period, and reap the direct child.
 		r.terminate(done)
@@ -207,11 +216,21 @@ func (r *CLIRunner) Run(ctx context.Context, req Request, logPath string) (RunRe
 }
 
 // Cancel stops the job that Run is currently executing. It TERMs the process
-// group, waits for the child to exit or for ctx to expire, then KILLs the
-// group. When no job is running it is a no-op.
+// group, waits up to the runner's grace period (or ctx, if sooner), then KILLs
+// the group and waits for the child to be reaped. It also wakes a Run that is
+// blocked waiting for normal completion. When no job is running it is a no-op.
 func (r *CLIRunner) Cancel(ctx context.Context) error {
 	r.mu.Lock()
 	r.cancelRequested = true
+	if r.cancelCh != nil {
+		// Wake Run even if the caller never cancels Run's context. Closing is
+		// idempotent because the whole block runs under r.mu.
+		select {
+		case <-r.cancelCh:
+		default:
+			close(r.cancelCh)
+		}
+	}
 	pgid := r.pgid
 	done := r.done
 	r.mu.Unlock()
@@ -225,18 +244,15 @@ func (r *CLIRunner) Cancel(ctx context.Context) error {
 	if done == nil {
 		return nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
+
+	// Cancel owns the full TERM -> grace -> KILL escalation. It must not
+	// depend on the caller also cancelling Run's context: the caller's context
+	// can only make the escalation happen sooner.
+	var stop <-chan struct{}
+	if ctx != nil {
+		stop = ctx.Done()
 	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-	}
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("jobs: kill CLI process group: %w", err)
-	}
-	<-done
+	r.escalate(pgid, done, stop)
 	return nil
 }
 
@@ -250,7 +266,13 @@ func (r *CLIRunner) terminate(done <-chan struct{}) {
 		return
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	r.escalate(pgid, done, nil)
+}
 
+// escalate waits for every member of pgid's process group to exit, sending
+// SIGKILL when the grace period or stop expires. SIGTERM must already have been
+// sent. The direct child is always reaped through done.
+func (r *CLIRunner) escalate(pgid int, done <-chan struct{}, stop <-chan struct{}) {
 	deadline := time.NewTimer(r.grace)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -265,13 +287,19 @@ func (r *CLIRunner) terminate(done <-chan struct{}) {
 		select {
 		case <-waitDone:
 			reaped = true
-		case <-ticker.C:
+		case <-stop:
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			if !reaped {
+				<-done
+			}
+			return
 		case <-deadline.C:
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 			if !reaped {
 				<-done
 			}
 			return
+		case <-ticker.C:
 		}
 	}
 	if !reaped {

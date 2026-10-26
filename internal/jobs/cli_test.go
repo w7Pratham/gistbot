@@ -521,3 +521,146 @@ while :; do sleep 1; done
 		t.Errorf("process %d survived SIGKILL", pid)
 	}
 }
+
+// TestCLIRunnerCancelEscalatesToSIGKILL covers Cancel on its own: the Run
+// context is never cancelled, so only Cancel's TERM -> grace -> KILL sequence
+// can stop a child that ignores SIGTERM.
+func TestCLIRunnerCancelEscalatesToSIGKILL(t *testing.T) {
+	f := newCLIFixture(t)
+	childPath := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("FAKE_CHILD", childPath)
+	script := writeScript(t, `#!/bin/sh
+trap '' TERM
+echo $$ > "$FAKE_CHILD"
+while :; do sleep 1; done
+`)
+
+	runner := NewCLIRunner(script)
+	runner.grace = 100 * time.Millisecond
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = runner.Cancel(ctx)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := runner.Run(ctx, f.req, f.logPath)
+		runDone <- err
+	}()
+
+	pid := waitForPIDFile(t, childPath, 5*time.Second)
+
+	// A background context must not be needed to make Cancel escalate.
+	cancelDone := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		cancelDone <- runner.Cancel(context.Background())
+	}()
+	select {
+	case err := <-cancelDone:
+		if err != nil {
+			t.Fatalf("Cancel returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Cancel did not return; it never escalated to SIGKILL")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Cancel took %s, want less than the 5s bound", elapsed)
+	}
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, ErrCancelled) {
+			t.Fatalf("Run error = %v, want ErrCancelled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Cancel woke it")
+	}
+	if !waitForGone(pid, 5*time.Second) {
+		t.Errorf("process %d survived Cancel", pid)
+	}
+}
+
+func TestCLIRunnerRejectsConcurrentRun(t *testing.T) {
+	f := newCLIFixture(t)
+	t.Setenv("FAKE_MODE", "sleep")
+	childPath := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("FAKE_CHILD", childPath)
+
+	runner := NewCLIRunner(f.bin)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer ccancel()
+		_ = runner.Cancel(cctx)
+	})
+
+	logDir := t.TempDir()
+	logs := [2]string{
+		filepath.Join(logDir, "job-1.log"),
+		filepath.Join(logDir, "job-2.log"),
+	}
+
+	type outcome struct {
+		log string
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan outcome, len(logs))
+	for i := range logs {
+		go func(logPath string) {
+			<-start
+			_, err := runner.Run(ctx, f.req, logPath)
+			results <- outcome{log: logPath, err: err}
+		}(logs[i])
+	}
+	// Release both calls together so they race for the single-job guard.
+	close(start)
+
+	var rejected outcome
+	select {
+	case rejected = <-results:
+	case <-time.After(10 * time.Second):
+		t.Fatal("neither concurrent Run was rejected")
+	}
+	if !errors.Is(rejected.err, errRunnerBusy) {
+		t.Fatalf("first finished Run error = %v, want errRunnerBusy", rejected.err)
+	}
+
+	// The active call must be running now.
+	childPID := waitForPIDFile(t, childPath, 10*time.Second)
+
+	// The rejected call must not even have opened its log.
+	existing := 0
+	for _, logPath := range logs {
+		if _, err := os.Stat(logPath); err == nil {
+			existing++
+		}
+	}
+	if existing != 1 {
+		t.Errorf("%d job logs exist, want only the active job's log", existing)
+	}
+
+	cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelCancel()
+	if err := runner.Cancel(cancelCtx); err != nil {
+		t.Fatalf("Cancel returned error: %v", err)
+	}
+
+	select {
+	case active := <-results:
+		if !errors.Is(active.err, ErrCancelled) {
+			t.Fatalf("active Run error = %v, want ErrCancelled", active.err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("active Run did not return after Cancel")
+	}
+	if !waitForGone(childPID, 5*time.Second) {
+		t.Errorf("fake child process %d survived cancellation", childPID)
+	}
+}
