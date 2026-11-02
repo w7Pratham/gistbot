@@ -1,0 +1,42 @@
+name: Feature Request
+description: Suggest an idea or enhancement for Gistbot
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a new feature or improvement for Gistbot!
+        Please review our [Contributing Guidelines](https://github.com/w7Pratham/gistbot/blob/main/CONTRIBUTING.md) before submitting.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: Is your feature request related to a problem? A clear and concise description of what the problem is.
+      placeholder: e.g., I'm always frustrated when...
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_behavior
+    attributes:
+      label: Proposed Solution or Behavior
+      description: A clear and concise description of what you want to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: A clear and concise description of any alternative solutions or features you've considered.
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope_check
+    attributes:
+      label: Scope Check
+      description: Gistbot is strictly an owner-only, single-tenant, Go-standard-library bot.
+      options:
+        - label: I understand that Gistbot is strictly owner-only and single-tenant by design (no multi-user support or SaaS features).
+          required: true
+        - label: I understand that Gistbot relies strictly on Go standard library dependencies without third-party additions.
+          required: true

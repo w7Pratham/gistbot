@@ -1,0 +1,77 @@
+name: Bug Report
+description: File a bug report for Gistbot
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue!
+        **Security notice:** If you found a security vulnerability, do NOT use this form. Please report it privately via [GitHub Security Advisories](https://github.com/w7Pratham/gistbot/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: Gistbot Version or Git Commit
+      description: What version or git commit SHA of Gistbot are you running?
+      placeholder: e.g., main @ git rev-parse HEAD
+    validations:
+      required: true
+  - type: input
+    id: go_version
+    attributes:
+      label: Go Version
+      description: Output of `go version`
+      placeholder: e.g., go version go1.25.0 linux/amd64
+    validations:
+      required: true
+  - type: input
+    id: opencode_version
+    attributes:
+      label: OpenCode Version
+      description: Output of `opencode --version`
+      placeholder: e.g., opencode 1.x.y
+    validations:
+      required: true
+  - type: dropdown
+    id: runner
+    attributes:
+      label: Runner Backend
+      description: Which runner backend were you using when the issue occurred?
+      options:
+        - cli
+        - api
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include error messages or unexpected outcomes.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted Log Excerpt
+      description: |
+        Please provide relevant log excerpts.
+        CRITICAL: Redact all bot tokens, passwords, and environment secrets before pasting!
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I confirm that no Telegram bot tokens, API passwords, or environment secrets are included in this report.
+          required: true
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true
