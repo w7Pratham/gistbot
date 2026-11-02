@@ -10,8 +10,8 @@ set -euo pipefail
 
 GISTBOT_USER="gistbot"
 GISTBOT_HOME="/home/${GISTBOT_USER}"
-SRC_BIN="/home/shiv/.opencode/bin/opencode"
-SRC_SKILL="/home/shiv/.config/opencode/skills/repo-gist/SKILL.md"
+SRC_BIN="${OPENCODE_SRC:-$(command -v opencode || true)}"
+SRC_SKILL="${REPO_GIST_SKILL:-$HOME/.config/opencode/skills/repo-gist/SKILL.md}"
 CONFIG_DIR="${GISTBOT_HOME}/.config"
 ENV_DIR="${CONFIG_DIR}/gistbot"
 ENV_FILE="${ENV_DIR}/gistbot.env"
@@ -22,12 +22,12 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-if [ ! -x "$SRC_BIN" ]; then
-  echo "Missing OpenCode binary: $SRC_BIN" >&2
+if [ -z "$SRC_BIN" ] || [ ! -x "$SRC_BIN" ]; then
+  echo "Missing or non-executable OpenCode binary: ${SRC_BIN:-<empty>} (set OPENCODE_SRC or put opencode on PATH)" >&2
   exit 1
 fi
-if [ ! -f "$SRC_SKILL" ]; then
-  echo "Missing repo-gist skill: $SRC_SKILL" >&2
+if [ -z "$SRC_SKILL" ] || [ ! -f "$SRC_SKILL" ]; then
+  echo "Missing repo-gist skill: ${SRC_SKILL:-<empty>} (set REPO_GIST_SKILL)" >&2
   exit 1
 fi
 if ! command -v git >/dev/null 2>&1; then

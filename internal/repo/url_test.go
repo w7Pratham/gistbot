@@ -143,7 +143,7 @@ func TestValidID(t *testing.T) {
 		{name: "underscores in repo", id: "github__owner__my__repo", want: true},
 		{name: "empty", id: "", want: false},
 		{name: "traversal", id: "../x", want: false},
-		{name: "absolute", id: "/home/shiv/repo", want: false},
+		{name: "absolute", id: "/home/example/repo", want: false},
 		{name: "url", id: "https://github.com/owner/repo", want: false},
 		{name: "missing separator", id: "github__owner", want: false},
 		{name: "empty repo", id: "github__owner__", want: false},
@@ -181,7 +181,7 @@ func TestRepoDir(t *testing.T) {
 	invalid := []string{
 		"",
 		"../x",
-		"/home/shiv/repo",
+		"/home/example/repo",
 		"github__owner__repo/extra",
 		"github__owner__repo/../other",
 		"GITHUB__owner__repo",

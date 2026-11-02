@@ -6,3 +6,11 @@ docs/m0-gistbot.md
 *.log
 coverage.out
 *.test
+
+# Filled env files may live at the repo root for scripts/host-install.sh.
+/gistbot.env
+/opencode-api.env
+*.env
+
+.DS_Store
+
