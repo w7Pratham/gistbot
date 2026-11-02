@@ -1,5 +1,5 @@
 // Package jobs defines the requests, results, and runner contracts shared by
-// Zero Two's CLI and API runners and its single-worker job manager.
+// Gistbot's CLI and API runners and its single-worker job manager.
 package jobs
 
 import (

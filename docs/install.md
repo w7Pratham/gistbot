@@ -1,6 +1,6 @@
-# Install and operate Zero Two (GistBot)
+# Install and operate Gistbot
 
-Zero Two runs as the dedicated `gistbot` Unix user in two systemd **user**
+Gistbot runs as the dedicated `gistbot` Unix user in two systemd **user**
 units:
 
 | Unit | Role |
@@ -13,7 +13,7 @@ The bot never starts the API server during normal operation. It only asks
 check fails. Both units must be running for the `api` runner.
 
 All paths, users, and service names below are fixed by the project. The bot
-binary is `gistbot`; the display name is Zero Two (02).
+binary is `gistbot`; the display name is Gistbot.
 
 ## 1. M0 setup
 

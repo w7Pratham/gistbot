@@ -422,7 +422,7 @@ func TestIgnoresNonOwnerGroupAndChannel(t *testing.T) {
 
 func TestHelpIsCompactAndHasSettingsFooter(t *testing.T) {
 	f := newBotFixture(t)
-	f.handle(privateUpdate("/help@ZeroTwoBot"))
+	f.handle(privateUpdate("/help@gistbot"))
 
 	texts := f.sender.messageTexts()
 	if len(texts) != 1 {
@@ -431,6 +431,7 @@ func TestHelpIsCompactAndHasSettingsFooter(t *testing.T) {
 	text := texts[0]
 
 	requireNotContains(t, text, "<pre>")
+	requireContains(t, text, "<b>Gistbot</b> · commands")
 	requireContains(t, text, "<b>")
 
 	for _, command := range []string{
@@ -477,7 +478,7 @@ func TestStartIsShortAndFriendly(t *testing.T) {
 	}
 	text := texts[0]
 
-	requireContains(t, text, "<b>Zero Two</b>")
+	requireContains(t, text, "<b>Gistbot</b>")
 	requireContains(t, text, "GitHub")
 	requireContains(t, text, "<code>/gist")
 	requireContains(t, text, "<code>/help")

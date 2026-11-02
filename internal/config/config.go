@@ -1,4 +1,4 @@
-// Package config loads and validates the Zero Two (gistbot) runtime
+// Package config loads and validates the Gistbot runtime
 // configuration from environment variables supplied by systemd.
 package config
 

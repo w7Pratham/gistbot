@@ -1,4 +1,4 @@
-// Command gistbot runs Zero Two, the owner-only Telegram front end for the
+// Command gistbot runs Gistbot, the owner-only Telegram front end for the
 // repo-gist workflow. It loads validated configuration, wires the Telegram,
 // repository, job, and OpenCode components, and shuts down gracefully on
 // SIGINT or SIGTERM.

@@ -1,4 +1,4 @@
-// Package bot implements Zero Two's owner-only Telegram command surface and
+// Package bot implements Gistbot's owner-only Telegram command surface and
 // delivers finished jobs back to the owner.
 //
 // The poller already drops updates that do not come from the owner, but Handle

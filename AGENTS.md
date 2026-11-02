@@ -1,6 +1,6 @@
-# AGENTS.md — Zero Two (gistbot)
+# AGENTS.md — Gistbot
 
-Zero Two (short **02**) is a private, owner-only Telegram bot. Technical
+Gistbot is a self-hosted, owner-only Telegram bot. Technical
 identifiers remain `gistbot`. Read this checklist before changing code.
 
 ## Non-negotiable rules

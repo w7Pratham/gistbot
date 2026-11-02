@@ -1,4 +1,4 @@
-// Package state provides Zero Two's durable, atomically written state file.
+// Package state provides Gistbot's durable, atomically written state file.
 //
 // The store keeps the Telegram update offset, the selected runner and model,
 // an optional free-model override, and the most recent job records. Every

@@ -425,7 +425,7 @@ func (b *Bot) currentSelection() (selection, error) {
 // to try, and one current-settings footer.
 func (b *Bot) startText() string {
 	return strings.Join([]string{
-		"<b>Zero Two</b>",
+		"<b>Gistbot</b>",
 		"Send a GitHub repo and I'll write its gist docs — quietly.",
 		"",
 		commandHelpLine("/gist url [focus]", "start a job"),
@@ -439,7 +439,7 @@ func (b *Bot) startText() string {
 // current model, runner, and job state appear exactly once in the footer.
 func (b *Bot) helpText() string {
 	return strings.Join([]string{
-		"<b>02</b> · commands",
+		"<b>Gistbot</b> · commands",
 		"",
 		commandHelpLine("/gist url [focus]", "docs for a repo"),
 		commandHelpLine("/status", "running job and queue"),

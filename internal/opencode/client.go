@@ -1,5 +1,5 @@
 // Package opencode provides the typed subset of the OpenCode HTTP API used by
-// Zero Two (gistbot) and model listing from the OpenCode CLI.
+// Gistbot and model listing from the OpenCode CLI.
 //
 // Every request authenticates with Basic auth username "opencode" and the
 // password supplied to NewClient. Errors name the operation, the HTTP status,

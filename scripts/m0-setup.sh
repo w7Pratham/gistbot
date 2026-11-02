@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Zero Two / GistBot M0 setup. Run as root:
+# GistBot M0 setup. Run as root:
 #   sudo bash scripts/m0-setup.sh
 #
 # This creates the dedicated user, installs the hardened agent and skill, writes
