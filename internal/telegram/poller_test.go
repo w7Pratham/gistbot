@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"gistbot/internal/state"
+	"github.com/w7Pratham/gistbot/internal/state"
 )
 
 const testOwnerID int64 = 4242

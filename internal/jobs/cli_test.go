@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"gistbot/internal/config"
-	"gistbot/internal/repo"
+	"github.com/w7Pratham/gistbot/internal/config"
+	"github.com/w7Pratham/gistbot/internal/repo"
 )
 
 func fakeOpenCodePath(t *testing.T) string {

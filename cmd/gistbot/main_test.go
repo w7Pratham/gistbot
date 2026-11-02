@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"gistbot/internal/bot"
-	"gistbot/internal/config"
-	"gistbot/internal/state"
-	"gistbot/internal/telegram"
+	"github.com/w7Pratham/gistbot/internal/bot"
+	"github.com/w7Pratham/gistbot/internal/config"
+	"github.com/w7Pratham/gistbot/internal/state"
+	"github.com/w7Pratham/gistbot/internal/telegram"
 )
 
 const (

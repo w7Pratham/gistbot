@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"gistbot/internal/config"
-	"gistbot/internal/repo"
-	"gistbot/internal/state"
+	"github.com/w7Pratham/gistbot/internal/config"
+	"github.com/w7Pratham/gistbot/internal/repo"
+	"github.com/w7Pratham/gistbot/internal/state"
 )
 
 const (

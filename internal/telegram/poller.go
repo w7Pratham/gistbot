@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"gistbot/internal/state"
+	"github.com/w7Pratham/gistbot/internal/state"
 )
 
 const (

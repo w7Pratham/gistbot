@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"gistbot/internal/jobs"
-	"gistbot/internal/state"
+	"github.com/w7Pratham/gistbot/internal/jobs"
+	"github.com/w7Pratham/gistbot/internal/state"
 )
 
 // installRepo creates an installed repository directory with gist documents

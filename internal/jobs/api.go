@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"gistbot/internal/opencode"
+	"github.com/w7Pratham/gistbot/internal/opencode"
 )
 
 const (

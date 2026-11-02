@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"gistbot/internal/config"
-	"gistbot/internal/jobs"
-	"gistbot/internal/state"
+	"github.com/w7Pratham/gistbot/internal/config"
+	"github.com/w7Pratham/gistbot/internal/jobs"
+	"github.com/w7Pratham/gistbot/internal/state"
 )
 
 // snapshotState returns the in-memory state after a command.

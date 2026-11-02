@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"gistbot/internal/opencode"
+	"github.com/w7Pratham/gistbot/internal/opencode"
 )
 
 const apiFakeSessionID = "ses_api_fixture"

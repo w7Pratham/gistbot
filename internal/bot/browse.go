@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"gistbot/internal/jobs"
-	"gistbot/internal/repo"
-	"gistbot/internal/state"
+	"github.com/w7Pratham/gistbot/internal/jobs"
+	"github.com/w7Pratham/gistbot/internal/repo"
+	"github.com/w7Pratham/gistbot/internal/state"
 )
 
 const (

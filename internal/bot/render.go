@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"gistbot/internal/config"
-	"gistbot/internal/jobs"
-	"gistbot/internal/repo"
-	"gistbot/internal/state"
-	"gistbot/internal/telegram"
+	"github.com/w7Pratham/gistbot/internal/config"
+	"github.com/w7Pratham/gistbot/internal/jobs"
+	"github.com/w7Pratham/gistbot/internal/repo"
+	"github.com/w7Pratham/gistbot/internal/state"
+	"github.com/w7Pratham/gistbot/internal/telegram"
 )
 
 const (
