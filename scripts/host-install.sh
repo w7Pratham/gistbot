@@ -47,10 +47,10 @@ say "installing binary"
 install -o "$BOT_USER" -g "$BOT_USER" -m 0755 "$REPO/bin/gistbot" "$BOT_HOME/bin/gistbot"
 
 say "installing opencode binary for $BOT_USER"
-if [ -x "$BOT_HOME/.opencode/bin/opencode" ] && cmp -s "$OPENCODE_SRC" "$BOT_HOME/.opencode/bin/opencode"; then
+if [ -n "$OPENCODE_SRC" ] && [ -x "$OPENCODE_SRC" ] && [ -x "$BOT_HOME/.opencode/bin/opencode" ] && cmp -s "$OPENCODE_SRC" "$BOT_HOME/.opencode/bin/opencode"; then
   echo "    already up to date"
 else
-  [ -x "$OPENCODE_SRC" ] || die "opencode binary not found at $OPENCODE_SRC (set OPENCODE_SRC=...)"
+  [ -n "$OPENCODE_SRC" ] && [ -x "$OPENCODE_SRC" ] || die "opencode binary not found at ${OPENCODE_SRC:-(empty)} (set OPENCODE_SRC=...)"
   install -o "$BOT_USER" -g "$BOT_USER" -m 0755 "$OPENCODE_SRC" "$BOT_HOME/.opencode/bin/opencode"
 fi
 

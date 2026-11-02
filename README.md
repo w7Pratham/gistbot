@@ -163,7 +163,9 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidelines and [AGENT
 │   ├── state/                 # persisted model, runner, and job state
 │   └── telegram/              # Telegram client and long-poll loop
 └── scripts/
-    └── host-install.sh        # host installation script
+    ├── host-install.sh        # host installation script
+    ├── m0-run.sh              # M0 proof run script (historical)
+    └── m0-setup.sh            # M0 proof setup script (historical)
 ```
 
 ## Contributing / License

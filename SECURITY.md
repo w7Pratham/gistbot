@@ -62,7 +62,7 @@ The following areas are considered out of scope:
 
 ## Response & Disclosure Process
 
-- **Acknowledgement**: The maintainer aims to acknowledge received vulnerability reports on a best-effort basis within **7 business days**.
+- **Acknowledgement**: The maintainer aims to acknowledge received vulnerability reports on a best-effort basis within **7 days**.
 - **Triage & Remediation**: If verified, a fix will be developed and tested privately before publication.
 - **Bounty**: Gistbot is an unpaid, open-source hobby project; there is **no bug bounty program** or monetary reward.
 
